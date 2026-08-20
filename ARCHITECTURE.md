@@ -291,7 +291,7 @@ Rows are reused across windows rather than inserted per window, and swept by
 ```mermaid
 flowchart TB
     subgraph Untrusted["UNTRUSTED — fully attacker-controlled"]
-        Body["JSON body ≤ 16kb<br/>app.ts:69"]
+        Body["JSON body ≤ 16kb<br/>app.ts:71"]
         Cookies["accessToken / refreshToken cookies"]
         Hdrs["Authorization, X-Request-Id, X-Forwarded-For"]
     end
@@ -359,7 +359,7 @@ header is also accepted for non-browser callers
 
 **Swagger UI is a trust decision, not a docs decision.** It enumerates every
 endpoint and body shape, so it is mounted only when `ENABLE_API_DOCS` says so,
-defaulting to local (`src/app.ts:43-59`, `src/config/index.ts:214-216`). It gets
+defaulting to local (`src/app.ts:45-61`, `src/config/index.ts:218-220`). It gets
 its own relaxed CSP so the rest of the API keeps the strict one.
 
 ---
@@ -455,7 +455,7 @@ may already be spent by the time this transaction re-reads it.
 
 ### 7.3 Counting failed logins — the increment happens inside the UPDATE
 
-`src/services/UserService.ts:85-107`.
+`src/services/UserService.ts:97-122`.
 
 The old shape computed `user.failedLoginAttempts + 1` in JavaScript from a row
 read earlier in the request, so two failures arriving together both read 3 and
@@ -469,7 +469,7 @@ The same statement implements exponential backoff, doubling from
 first lock a real user hits after mistyping costs a minute rather than fifteen.
 DECISIONS.md decision 6 owns the residual DoS.
 
-> ⚠️ **This statement has a defect.** See §9.
+> ⚠️ **This statement carried a defect that §9 records, now fixed in `57a3dc9`.**
 
 ### 7.4 Burning a one-time token, and the rate-limit counter
 
@@ -553,7 +553,7 @@ and the unique index is the authority — `23505` is caught and turned into a 40
 **`registerFailedLogin` freezes the lockout counter after ~1,028 failures, and
 returns 500 from then on.**
 
-`src/services/UserService.ts:93` computes the backoff as:
+Before `57a3dc9`, `registerFailedLogin` computed the backoff as:
 
 ```sql
 LEAST($3::numeric * power(2, "failedLoginAttempts" + 1 - $2)::numeric, $4::numeric)
@@ -577,7 +577,7 @@ Consequences, in order of severity:
    aborts, so `failedLoginAttempts` stops climbing and `lockedUntil` stops being
    extended. Once the last lock expires the account can never be locked again —
    only a successful login resets the counter
-   (`src/services/UserService.ts:109-115`). The attacker who caused it is the
+   (`src/services/UserService.ts:124-130`). The attacker who caused it is the
    one who benefits from it.
 2. **`POST /auth/login` returns 500 for that email** on any wrong password
    (`AuthController.ts:93` → `catch` → `next(err)`), where every other address
@@ -602,7 +602,7 @@ Worth recording how it was found: writing this section required explaining what
 
 **A second, lower-severity mismatch:** the `accessToken` cookie's `maxAge` is
 hard-coded to one hour (`src/utils/cookies.ts:27,36`) while the token's own
-lifetime is `ACCESS_TOKEN_EXPIRY` (`src/config/index.ts:202`). They agree at the
+lifetime is `ACCESS_TOKEN_EXPIRY` (`src/config/index.ts:206`). They agree at the
 default and diverge the moment anyone changes the variable — set it to `7d` and
 the browser discards a still-valid token after an hour; set it to `15m` and the
 cookie outlives the token by 45 minutes. One lifetime, two sources of truth.
