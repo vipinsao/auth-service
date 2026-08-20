@@ -147,3 +147,6 @@ vite.config.ts.timestamp-*
 certs/
 # Compiled output
 build/
+
+# Local development database created by `npm run db:local`
+.postgres/

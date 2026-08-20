@@ -72,10 +72,39 @@ export class AuthController {
 
     try {
       const user = await this.userService.findByEmail(email);
-      if (!user) {
+
+      // Both branches run one bcrypt compare at the same cost factor.
+      //
+      // Returning early for an unknown address is measurable: the known path
+      // spent ~60ms in bcrypt and the unknown path spent none, so response time
+      // answered "does this address have an account?" however identical the
+      // error body was. The dummy comparison is not decoration - it is the half
+      // of the defence that the error body cannot provide.
+      //
+      // `await` is load-bearing throughout: bcrypt.compare returns a Promise,
+      // and an un-awaited Promise is always truthy, which is how the original
+      // version of this handler accepted any password at all.
+      const passwordMatches = user
+        ? await this.credentialService.comparePassword(password, user.password)
+        : await this.credentialService.compareAgainstAbsentUser(password);
+
+      if (!user || !passwordMatches) {
+        if (user) {
+          await this.userService.registerFailedLogin(user);
+          req.log.warn("failed login", { userId: user.id });
+        } else {
+          req.log.warn("failed login for unknown address");
+        }
         return next(createHttpError(400, CREDENTIALS_REJECTED));
       }
 
+      // The lock is checked only now, after the password has been proved
+      // correct. Checked before, 423 was a second enumeration oracle: five
+      // failures against a guessed address returned 400 if nobody owned it and
+      // 423 if somebody did, so an attacker learned the answer without ever
+      // knowing a password. A caller who reaches this line already knows the
+      // password, so telling them why they are being refused costs nothing and
+      // is the difference between a useful message and a baffling one.
       if (user.lockedUntil && user.lockedUntil.getTime() > Date.now()) {
         req.log.warn("login attempt on locked account", { userId: user.id });
         return next(
@@ -84,19 +113,6 @@ export class AuthController {
             "Account is temporarily locked after too many failed attempts",
           ),
         );
-      }
-
-      // `await` is load-bearing: bcrypt.compare returns a Promise, and an
-      // un-awaited Promise is always truthy, which would accept any password.
-      const passwordMatches = await this.credentialService.comparePassword(
-        password,
-        user.password,
-      );
-
-      if (!passwordMatches) {
-        await this.userService.registerFailedLogin(user);
-        req.log.warn("failed login", { userId: user.id });
-        return next(createHttpError(400, CREDENTIALS_REJECTED));
       }
 
       if (Config.REQUIRE_EMAIL_VERIFICATION && !user.emailVerified) {
@@ -172,6 +188,24 @@ export class AuthController {
       }
 
       const replacement = await this.tokenService.rotate(stored, user);
+
+      // The row was live when it was read a moment ago and is spent now, so a
+      // concurrent request rotated it in between. At the database that is
+      // indistinguishable from the replay handled above - two callers presented
+      // the same token - so it gets the same answer, for the same reason: the
+      // service cannot tell which of them is the thief, and guessing wrong
+      // leaves the attacker logged in. DECISIONS.md decision 5 already owns the
+      // cost, which is that a client racing its own refresh is logged out.
+      if (!replacement) {
+        await this.tokenService.revokeFamily(stored.familyId);
+        req.log.warn("concurrent refresh of one token - family revoked", {
+          userId: stored.userId,
+          familyId: stored.familyId,
+        });
+        clearAuthCookies(res);
+        return next(createHttpError(401, "Refresh token reuse detected"));
+      }
+
       const claims: JwtPayload = { sub: String(user.id), role: user.role };
       setAuthCookies(
         res,

@@ -57,16 +57,53 @@ export class UserService {
     });
   }
 
-  /** Called on every failed login; locks the account once the cap is reached. */
+  /**
+   * Called on every failed login. Counts the failure and, once the cap is
+   * reached, locks the account for a period that doubles with each further
+   * failure up to `ACCOUNT_LOCK_MINUTES`.
+   *
+   * One statement, no read-then-write. The old version computed
+   * `user.failedLoginAttempts + 1` in JavaScript from a row read earlier in the
+   * request, so two failures arriving together both read 3 and both wrote 4:
+   * the counter advanced by one instead of two, and an attacker who simply sent
+   * guesses in parallel could stay under the cap indefinitely. The increment
+   * now happens inside the UPDATE, where the row lock serialises it - the same
+   * conditional-update shape as `VerificationTokenService.consume`.
+   *
+   * The backoff is the other half. A flat 15 minutes made this a denial of
+   * service: anyone who knew an address could lock it out for a quarter of an
+   * hour with five requests. Doubling from one minute means the first lock -
+   * the one a real user hits after mistyping a password, and the one a drive-by
+   * attacker causes - costs a minute, while a persistent attacker still climbs
+   * to the same cap. It does not remove the DoS, and DECISIONS.md decision 6
+   * says so plainly; it reduces the common case by fifteen times.
+   *
+   * `failedLoginAttempts` is no longer reset to zero on locking. It has to keep
+   * climbing for the backoff to have anything to count, and a successful login
+   * is what clears it.
+   */
   async registerFailedLogin(user: User): Promise<void> {
-    const attempts = user.failedLoginAttempts + 1;
-    const locked = attempts >= Config.MAX_FAILED_LOGIN_ATTEMPTS;
-    await this.userRepository.update(user.id, {
-      failedLoginAttempts: locked ? 0 : attempts,
-      lockedUntil: locked
-        ? new Date(Date.now() + Config.ACCOUNT_LOCK_MINUTES * 60 * 1000)
-        : user.lockedUntil,
-    });
+    await this.userRepository.query(
+      `UPDATE "user"
+          SET "failedLoginAttempts" = "failedLoginAttempts" + 1,
+              "lockedUntil" = CASE
+                WHEN "failedLoginAttempts" + 1 >= $2
+                  THEN now() + (
+                    LEAST(
+                      $3::numeric * power(2, "failedLoginAttempts" + 1 - $2)::numeric,
+                      $4::numeric
+                    )::text || ' minutes'
+                  )::interval
+                ELSE "lockedUntil"
+              END
+        WHERE "id" = $1`,
+      [
+        user.id,
+        Config.MAX_FAILED_LOGIN_ATTEMPTS,
+        Config.ACCOUNT_LOCK_INITIAL_MINUTES,
+        Config.ACCOUNT_LOCK_MINUTES,
+      ],
+    );
   }
 
   async clearFailedLogins(user: User): Promise<void> {

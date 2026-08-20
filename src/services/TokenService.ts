@@ -86,19 +86,57 @@ export class TokenService {
    * Issue the successor of `current` inside the same family and mark `current`
    * spent. A later presentation of `current` therefore lands on a revoked row,
    * which is the signal used to detect replay.
+   *
+   * Returns null when the row had already been spent by someone else, which the
+   * caller must treat exactly as it treats a replay.
+   *
+   * The whole thing runs in one transaction that starts by taking a write lock
+   * on the row being spent. Two things forced that, and a conditional UPDATE
+   * alone was not enough for either:
+   *
+   * - The caller's check that the row was live is a read, and two concurrent
+   *   refreshes both pass it. Without the database picking a winner, both
+   *   rotate: the family ends up with two live successors and the replay that
+   *   should have burned it is never detected.
+   * - The loser then revokes the family, and it must not do so while the
+   *   winner's successor is still uncommitted - it would revoke the rows that
+   *   exist at that instant and the new one would quietly survive, leaving a
+   *   live token behind a detected replay. Holding the lock until commit means
+   *   the loser only proceeds once the successor is visible to it.
+   *
+   * `SELECT ... FOR UPDATE` is what makes the second caller wait rather than
+   * race. `VerificationTokenService.consume` gets away with a plain conditional
+   * UPDATE because burning a token creates nothing that a concurrent caller
+   * also has to see.
    */
-  async rotate(current: RefreshToken, user: User): Promise<RefreshToken> {
-    const replacement = await this.refreshTokenRepository.save({
-      user,
-      userId: user.id,
-      familyId: current.familyId,
-      expiresAt: this.expiryDate(),
+  async rotate(
+    current: RefreshToken,
+    user: User,
+  ): Promise<RefreshToken | null> {
+    return this.refreshTokenRepository.manager.transaction(async (manager) => {
+      const row = await manager.findOne(RefreshToken, {
+        where: { id: current.id },
+        lock: { mode: "pessimistic_write" },
+      });
+
+      // Re-read under the lock: by the time the lock is granted, a concurrent
+      // refresh may already have spent this row and committed.
+      if (!row || row.revokedAt !== null) return null;
+
+      const replacement = await manager.save(RefreshToken, {
+        user,
+        userId: user.id,
+        familyId: current.familyId,
+        expiresAt: this.expiryDate(),
+      });
+
+      await manager.update(RefreshToken, current.id, {
+        revokedAt: new Date(),
+        replacedByTokenId: replacement.id,
+      });
+
+      return replacement;
     });
-    await this.refreshTokenRepository.update(current.id, {
-      revokedAt: new Date(),
-      replacedByTokenId: replacement.id,
-    });
-    return replacement;
   }
 
   async revokeFamily(familyId: string): Promise<void> {

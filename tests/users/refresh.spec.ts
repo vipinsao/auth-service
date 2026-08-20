@@ -1,5 +1,5 @@
 import request from "supertest";
-import { DataSource } from "typeorm";
+import { DataSource, IsNull, Not } from "typeorm";
 import {
   describe,
   it,
@@ -151,6 +151,59 @@ describe("POST /auth/refresh", () => {
         .post("/auth/refresh")
         .set("Cookie", asCookieHeader(otherDevice));
       expect(stillValid.statusCode).toBe(200);
+    });
+
+    /**
+     * Rotation used to read the row, see revokedAt was null, and only then
+     * write. Two refreshes arriving together both passed that read, so both
+     * rotated: the family ended up with two live successors and the replay
+     * that should have burned it went undetected.
+     *
+     * Rotation now runs in a transaction that takes a write lock on the row it
+     * is spending, so the second caller waits instead of racing. The lock also
+     * has to be held until commit, which this test is what proved: with only a
+     * conditional UPDATE, the loser revoked the family in the window before the
+     * winner's successor was committed, and that successor quietly survived a
+     * detected replay.
+     */
+    it("lets only one of two simultaneous refreshes win", async () => {
+      const session = await login();
+      const cookie = asCookieHeader(session);
+
+      const [first, second] = await Promise.all([
+        request(app).post("/auth/refresh").set("Cookie", cookie),
+        request(app).post("/auth/refresh").set("Cookie", cookie),
+      ]);
+
+      const codes = [first.statusCode, second.statusCode].sort();
+      expect(codes).toEqual([200, 401]);
+
+      // Scoped to this login's family: registering also opens a session, and
+      // that one is a different family which must be left alone.
+      const repository = connection.getRepository(RefreshToken);
+      const winner = await repository.findOne({
+        where: { replacedByTokenId: Not(IsNull()) },
+      });
+      const family = winner!.familyId;
+
+      // Exactly one successor was created - not two, which is what the race
+      // produced before the row lock.
+      expect(await repository.count({ where: { familyId: family } })).toBe(2);
+
+      // And the loser being treated as a replay burned the whole family,
+      // including the successor the winner had just committed. That last part
+      // is the reason rotation holds the row lock until it commits: revoking
+      // the family a moment earlier would have missed the new row.
+      expect(
+        await repository.count({
+          where: { familyId: family, revokedAt: IsNull() },
+        }),
+      ).toBe(0);
+
+      // The unrelated session opened by registering is untouched.
+      expect(await repository.count({ where: { revokedAt: IsNull() } })).toBe(
+        1,
+      );
     });
   });
 });
