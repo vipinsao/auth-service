@@ -17,8 +17,16 @@ import { createRateLimitStore } from "./rateLimitStore.js";
  * RATE_LIMIT_DISABLED=false to switch it back on and assert it works - the flag
  * is read per request, not at import time, which is what makes that possible.
  */
-const rateLimitingDisabled = () =>
-  (process.env.RATE_LIMIT_DISABLED ?? String(Config.IS_TEST)) === "true";
+const rateLimitingDisabled = () => {
+  // `.env.example` lists this variable empty to document it, and dotenv turns
+  // that into "", which `??` does not treat as absent. An empty value means
+  // "unset", not "false".
+  const flag = process.env.RATE_LIMIT_DISABLED?.trim();
+  return (
+    (flag === undefined || flag === "" ? String(Config.IS_TEST) : flag) ===
+    "true"
+  );
+};
 
 const tooManyRequests = (req: Request, res: Response) => {
   req.log?.warn("rate limit exceeded", { path: req.originalUrl, ip: req.ip });

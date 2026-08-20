@@ -87,6 +87,16 @@ const csv = (value: string | undefined, fallback: string[]): string[] =>
         .filter(Boolean)
     : fallback;
 
+/**
+ * `.env.example` documents every optional variable by listing it with an empty
+ * value, which is how a reader learns the name and the default. dotenv then
+ * sets that variable to `""`, and `??` does not treat an empty string as
+ * absent - so `cp .env.example .env.dev` used to hand `expiresIn: ""` to
+ * jsonwebtoken and 500 every login. Every optional string reads through this.
+ */
+const str = <T extends string>(value: string | undefined, fallback: T): T =>
+  value === undefined || value.trim() === "" ? fallback : (value as T);
+
 const num = (value: string | undefined, fallback: number): number => {
   if (value === undefined || value === "") return fallback;
   const parsed = Number(value);
@@ -142,8 +152,8 @@ export const Config = {
   IS_LOCAL,
   IS_TEST: NODE_ENV === "test",
   PORT: num(process.env.PORT, 5501),
-  LOG_LEVEL: process.env.LOG_LEVEL ?? "info",
-  APP_BASE_URL: process.env.APP_BASE_URL ?? "http://localhost:3000",
+  LOG_LEVEL: str(process.env.LOG_LEVEL, "info"),
+  APP_BASE_URL: str(process.env.APP_BASE_URL, "http://localhost:3000"),
 
   // Database
   DB_HOST: process.env.DB_HOST as string,
@@ -153,10 +163,10 @@ export const Config = {
   DB_NAME: process.env.DB_NAME as string,
 
   // Tokens
-  PRIVATE_KEY_PATH: process.env.PRIVATE_KEY_PATH ?? "certs/private.pem",
-  PUBLIC_KEY_PATH: process.env.PUBLIC_KEY_PATH ?? "certs/public.pem",
+  PRIVATE_KEY_PATH: str(process.env.PRIVATE_KEY_PATH, "certs/private.pem"),
+  PUBLIC_KEY_PATH: str(process.env.PUBLIC_KEY_PATH, "certs/public.pem"),
   REFRESH_TOKEN_SECRET: process.env.REFRESH_TOKEN_SECRET as string,
-  ACCESS_TOKEN_EXPIRY: process.env.ACCESS_TOKEN_EXPIRY ?? "1h",
+  ACCESS_TOKEN_EXPIRY: str(process.env.ACCESS_TOKEN_EXPIRY, "1h"),
   REFRESH_TOKEN_EXPIRY_DAYS: num(process.env.REFRESH_TOKEN_EXPIRY_DAYS, 30),
 
   // Proxying
@@ -183,9 +193,10 @@ export const Config = {
   ),
   AUTH_RATE_LIMIT_MAX: num(process.env.AUTH_RATE_LIMIT_MAX, 20),
   REFRESH_RATE_LIMIT_MAX: num(process.env.REFRESH_RATE_LIMIT_MAX, 120),
-  RATE_LIMIT_STORE: (process.env.RATE_LIMIT_STORE ?? "memory") as
-    | "memory"
-    | "postgres",
+  RATE_LIMIT_STORE: str<"memory" | "postgres">(
+    process.env.RATE_LIMIT_STORE,
+    "memory",
+  ),
   MAX_FAILED_LOGIN_ATTEMPTS: num(process.env.MAX_FAILED_LOGIN_ATTEMPTS, 5),
   /** The first lock. Each further failure doubles it, up to the cap below. */
   ACCOUNT_LOCK_INITIAL_MINUTES: num(
@@ -203,14 +214,14 @@ export const Config = {
   ),
 
   // Mail
-  MAIL_TRANSPORT: (process.env.MAIL_TRANSPORT ?? "json") as
-    | "json"
-    | "ethereal"
-    | "smtp",
-  MAIL_FROM: process.env.MAIL_FROM ?? "Auth Service <no-reply@auth.local>",
-  SMTP_HOST: process.env.SMTP_HOST,
+  MAIL_TRANSPORT: str<"json" | "ethereal" | "smtp">(
+    process.env.MAIL_TRANSPORT,
+    "json",
+  ),
+  MAIL_FROM: str(process.env.MAIL_FROM, "Auth Service <no-reply@auth.local>"),
+  SMTP_HOST: process.env.SMTP_HOST || undefined,
   SMTP_PORT: num(process.env.SMTP_PORT, 587),
   SMTP_SECURE: process.env.SMTP_SECURE === "true",
-  SMTP_USER: process.env.SMTP_USER,
-  SMTP_PASSWORD: process.env.SMTP_PASSWORD,
+  SMTP_USER: process.env.SMTP_USER || undefined,
+  SMTP_PASSWORD: process.env.SMTP_PASSWORD || undefined,
 };

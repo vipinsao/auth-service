@@ -447,3 +447,27 @@ never published a non-beta — `latest` is `18.4.0-beta.17`, which is why it is
 pinned exactly rather than caret-ranged. It is a development dependency: CI uses
 the `postgres` service in the workflow and Compose uses its own container, so
 neither the build nor the deployed image goes near it.
+
+## 17. An empty environment variable means unset, not empty
+
+**Decision.** Every optional string in `src/config/index.ts` is read through a
+`str()` helper that treats `""` the same as `undefined`, and the rate-limit
+flag does the same. `tests/unit/env-example.spec.ts` loads the committed
+`.env.example` and asserts the defaults survive it.
+
+**Why.** `.env.example` documents each optional variable by listing it with an
+empty value — that is how a reader learns the name and the default without
+reading the source. dotenv sets those to `""`, and `??` only falls back on
+`null` and `undefined`. So following the README exactly produced
+`ACCESS_TOKEN_EXPIRY=""`, which jsonwebtoken rejects: every login 500'd. The
+same shape left `RATE_LIMIT_DISABLED=""` reading as "not disabled", which
+switched the limiter on during the test run.
+
+Both are the same mistake in two files, which is the argument for a helper
+rather than two `||`s. The version of this file that documents its own
+variables is the version most likely to break this way, so the test reads the
+committed `.env.example` rather than a fixture: a variable added to the example
+without a default is caught the next time the suite runs.
+
+**Cost.** One indirection on every optional read, and a config test that fails
+if `.env.example` and the defaults drift apart — which is the point.

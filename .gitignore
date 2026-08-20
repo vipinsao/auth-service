@@ -150,3 +150,4 @@ build/
 
 # Local development database created by `npm run db:local`
 .postgres/
+.postgres.bak-*
