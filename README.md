@@ -34,6 +34,11 @@ independent Express apps.
 
 ## Architecture
 
+The full system-architecture document — trust boundaries, the data model,
+concurrency, failure modes and what this design deliberately does not do — is
+[ARCHITECTURE.md](./ARCHITECTURE.md). The diagram below is the shape of one
+request; that file explains the rest.
+
 ```mermaid
 flowchart LR
     Client[Client]
