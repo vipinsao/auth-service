@@ -52,9 +52,50 @@ const num = (value: string | undefined, fallback: number): number => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+/**
+ * The environments where it is safe to relax a protection.
+ *
+ * Every hardening decision is written as `!IS_LOCAL`, never as `IS_PRODUCTION`,
+ * and the difference matters. An allow-list of production spellings fails open:
+ * `NODE_ENV=staging`, `NODE_ENV=Production` or a value with a stray space is
+ * none of them, so the check says "not production" and the protection is
+ * silently off in a deployed environment. An allow-list of local spellings
+ * fails closed: an unrecognised value is treated as deployed and gets the
+ * strict behaviour. The worst case becomes a developer wondering why their
+ * cookie needs HTTPS, instead of a production cookie shipped without `secure`.
+ */
+const LOCAL_ENVIRONMENTS = ["dev", "development", "test"];
+
+/**
+ * `trust proxy` decides whether Express believes `X-Forwarded-For`, and
+ * `req.ip` is what the rate limiters key on. Trusting it when nothing strips
+ * the header lets any caller choose their own rate-limit bucket - and, since
+ * Express does not validate the value, choose a bucket that is not an IP
+ * address at all.
+ *
+ * So it defaults to `false`: only the real socket address is believed. Set
+ * `TRUST_PROXY` to the number of proxies in front of this service (`1` for a
+ * single load balancer), or to an Express-recognised value such as `loopback`
+ * or a subnet list. See DECISIONS.md decision 14.
+ */
+const trustProxy = (value: string | undefined): boolean | number | string => {
+  if (value === undefined || value.trim() === "") return false;
+  const trimmed = value.trim();
+  if (trimmed === "false") return false;
+  if (trimmed === "true") return true;
+  const hops = Number(trimmed);
+  if (Number.isInteger(hops) && hops >= 0) return hops;
+  // Express also accepts "loopback", "linklocal", "uniquelocal" and CIDR lists.
+  return trimmed;
+};
+
 export const Config = {
   NODE_ENV,
-  IS_PRODUCTION: NODE_ENV === "prod" || NODE_ENV === "production",
+  // There is deliberately no IS_PRODUCTION. It existed, it was an allow-list of
+  // production spellings, and both places that used it - the `secure` cookie
+  // flag and the 5xx message gate - failed open on any value that was not on
+  // the list. Removing it stops the next person reaching for it.
+  IS_LOCAL: LOCAL_ENVIRONMENTS.includes(NODE_ENV),
   IS_TEST: NODE_ENV === "test",
   PORT: num(process.env.PORT, 5501),
   LOG_LEVEL: process.env.LOG_LEVEL ?? "info",
@@ -74,6 +115,9 @@ export const Config = {
   ACCESS_TOKEN_EXPIRY: process.env.ACCESS_TOKEN_EXPIRY ?? "1h",
   REFRESH_TOKEN_EXPIRY_DAYS: num(process.env.REFRESH_TOKEN_EXPIRY_DAYS, 30),
 
+  // Proxying
+  TRUST_PROXY: trustProxy(process.env.TRUST_PROXY),
+
   // Cookies / CORS
   COOKIE_DOMAIN: process.env.COOKIE_DOMAIN || undefined,
   CORS_ORIGINS: csv(process.env.CORS_ORIGINS, ["http://localhost:3000"]),
@@ -89,6 +133,12 @@ export const Config = {
     | "memory"
     | "postgres",
   MAX_FAILED_LOGIN_ATTEMPTS: num(process.env.MAX_FAILED_LOGIN_ATTEMPTS, 5),
+  /** The first lock. Each further failure doubles it, up to the cap below. */
+  ACCOUNT_LOCK_INITIAL_MINUTES: num(
+    process.env.ACCOUNT_LOCK_INITIAL_MINUTES,
+    1,
+  ),
+  /** The cap the doubling stops at - not a flat duration any more. */
   ACCOUNT_LOCK_MINUTES: num(process.env.ACCOUNT_LOCK_MINUTES, 15),
 
   // Email verification / password reset

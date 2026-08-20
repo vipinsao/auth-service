@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import type { Store, ClientRateLimitInfo, Options } from "express-rate-limit";
 import { AppDataSource } from "../config/data-source.js";
 import logger from "../config/logger.js";
@@ -46,9 +47,33 @@ export class PostgresRateLimitStore implements Store {
     this.prefix = `${prefix}:`;
   }
 
-  /** `auth` + `1.2.3.4` -> `auth:1.2.3.4`, so two limiters never collide. */
+  /**
+   * `auth` + `1.2.3.4` -> `auth:<sha256 of 1.2.3.4>`.
+   *
+   * Two jobs. The prefix keeps limiters apart, so `authLimiter` and
+   * `refreshLimiter` never share a budget. The hash makes the stored key a
+   * fixed 64 characters whatever arrives.
+   *
+   * The length is the security-relevant half. The client key comes from
+   * `req.ip`, and behind a trusted proxy that is `X-Forwarded-For`, which
+   * Express neither validates nor bounds. A header of a couple of hundred
+   * characters would overflow the `varchar(160)` column, Postgres would raise
+   * `22001 string_data_right_truncation`, and express-rate-limit would hand
+   * that to `next(err)` - an unauthenticated 500 on every credential endpoint,
+   * from one header. Hashing means the column cannot be the failure mode no
+   * matter what feeds it.
+   *
+   * Truncating instead would also fit, but two different long values could
+   * truncate to the same key, which hands an attacker a way to land in a
+   * victim's bucket deliberately. SHA-256 is not doing anything secret here -
+   * the input is a public IP address - it is being used for a fixed width and
+   * a collision resistance that truncation does not have.
+   *
+   * The cost is that the table no longer shows which address a row belongs to.
+   * `SELECT encode(sha256('1.2.3.4'), 'hex')` gets it back when debugging.
+   */
   private scope(key: string): string {
-    return `${this.prefix}${key}`;
+    return `${this.prefix}${createHash("sha256").update(key).digest("hex")}`;
   }
 
   init(options: Options): void {
@@ -132,8 +157,12 @@ export class PostgresRateLimitStore implements Store {
     this.lastSweep = now;
 
     try {
+      // No grace period: an expired row carries no information, because
+      // `increment` re-inserts it from scratch. The row used to be kept an
+      // extra hour for no reason beyond churn, which tripled how long a row
+      // written by a one-off caller stayed in the auth database.
       await AppDataSource.query(
-        `DELETE FROM "rate_limit_hit" WHERE "expiresAt" <= now() - interval '1 hour'`,
+        `DELETE FROM "rate_limit_hit" WHERE "expiresAt" <= now()`,
       );
     } catch (err) {
       logger.warn("rate limit sweep failed", {

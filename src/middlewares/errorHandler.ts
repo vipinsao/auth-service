@@ -39,8 +39,13 @@ export const errorHandler = (
   }
 
   // Internal failures must not leak stack details or SQL to the caller.
+  //
+  // Gated on `!IS_LOCAL` rather than `IS_PRODUCTION` so that an unrecognised
+  // NODE_ENV hides the detail instead of publishing it. The old check listed
+  // the production spellings, so `NODE_ENV=staging` echoed raw driver errors -
+  // table and column names included - to unauthenticated callers.
   const message =
-    statusCode >= 500 && Config.IS_PRODUCTION
+    statusCode >= 500 && !Config.IS_LOCAL
       ? "Internal server error"
       : err.message;
 

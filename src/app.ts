@@ -15,9 +15,19 @@ import healthRouter from "./routes/health.js";
 
 const app = express();
 
-// Behind a proxy or load balancer, express must trust X-Forwarded-For or every
-// client looks like the proxy and the per-IP rate limiter becomes useless.
-app.set("trust proxy", 1);
+// Whether X-Forwarded-For is believed, and therefore what `req.ip` is - which
+// is what the rate limiters key on.
+//
+// This used to be hard-coded to 1. Nothing in the shipped Compose stack puts a
+// proxy in front of the service, so the header was attacker-controlled: any
+// caller could send their own X-Forwarded-For, land in a rate-limit bucket of
+// their choosing, and never be throttled. Express does not validate the value
+// either, so the "IP" did not have to be an IP.
+//
+// It now defaults to false and is opt-in via TRUST_PROXY, because a service
+// that under-counts a proxy's clients is a worse deployment, while a service
+// that trusts a forged header is a broken rate limiter.
+app.set("trust proxy", Config.TRUST_PROXY);
 
 // First, so that even a 404 or a rejected request carries a request id.
 app.use(requestContext);

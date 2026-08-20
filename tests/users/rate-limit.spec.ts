@@ -60,4 +60,29 @@ describe("Per-IP rate limiting on /auth", () => {
     expect(throttled.statusCode).toBe(429);
     expect(throttled.body.errors[0].type).toBe("TooManyRequestsError");
   });
+
+  /**
+   * The credential budget was spent by the first case in this file, so anything
+   * still answering 400 here would be a caller who has been handed a fresh
+   * bucket. `trust proxy` defaults to false, so X-Forwarded-For is not believed
+   * and cannot be used to pick one - which is the whole point, since the header
+   * is chosen by the caller and Express does not check it is even an address.
+   */
+  it("does not let X-Forwarded-For buy a fresh budget", async () => {
+    const spoofs = [
+      "203.0.113.9",
+      "198.51.100.7, 203.0.113.9",
+      "not-an-ip-at-all",
+      "A".repeat(300),
+    ];
+
+    for (const spoof of spoofs) {
+      const response = await request(app)
+        .post("/auth/login")
+        .set("X-Forwarded-For", spoof)
+        .send({ email: "nobody@example.com", password: "whatever" });
+
+      expect(response.statusCode).toBe(429);
+    }
+  });
 });

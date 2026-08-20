@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import express from "express";
 import rateLimit from "express-rate-limit";
 import request from "supertest";
@@ -89,12 +90,14 @@ describe("PostgresRateLimitStore", () => {
     expect(other.totalHits).toBe(1);
     expect((await auth.get("1.2.3.4"))?.totalHits).toBe(2);
 
+    // Two rows, one per limiter: same client, same hash, different prefix.
     const rows = (await connection.query(
       `SELECT "key" FROM "rate_limit_hit" ORDER BY "key"`,
     )) as { key: string }[];
+    const digest = createHash("sha256").update("1.2.3.4").digest("hex");
     expect(rows.map((row) => row.key)).toEqual([
-      "auth:1.2.3.4",
-      "refresh:1.2.3.4",
+      `auth:${digest}`,
+      `refresh:${digest}`,
     ]);
   });
 
@@ -105,10 +108,11 @@ describe("PostgresRateLimitStore", () => {
     const first = await store.increment("client");
     expect(first.totalHits).toBe(1);
 
-    // Age the row past its window instead of waiting for it.
+    // Age the row past its window instead of waiting for it. Matched on the
+    // prefix because the rest of the stored key is a hash of the client key.
     await connection.query(
-      `UPDATE "rate_limit_hit" SET "expiresAt" = now() - interval '1 second' WHERE "key" = $1`,
-      ["test:client"], // the row key IS scoped, which is what we are ageing
+      `UPDATE "rate_limit_hit" SET "expiresAt" = now() - interval '1 second' WHERE "key" LIKE $1`,
+      ["test:%"],
     );
 
     const afterExpiry = await store.increment("client");
@@ -125,6 +129,43 @@ describe("PostgresRateLimitStore", () => {
     await store.decrement("client");
 
     expect((await store.get("client"))?.totalHits).toBe(0);
+  });
+
+  /**
+   * The client key is `req.ip`, and behind a trusted proxy that is
+   * X-Forwarded-For - a request header Express neither validates nor bounds.
+   * Before the key was hashed, a long enough header overflowed the
+   * varchar(160) primary key, Postgres raised 22001, and express-rate-limit
+   * handed that to next(err): an unauthenticated 500 on every credential
+   * endpoint, from one header.
+   */
+  it("survives a client key that is neither short nor an IP address", async () => {
+    const store = new PostgresRateLimitStore("test");
+    store.init({ windowMs: WINDOW_MS } as never);
+
+    const hostile = [
+      "A".repeat(4096),
+      "'; DROP TABLE rate_limit_hit; --",
+      "☃",
+    ];
+
+    for (const key of hostile) {
+      const result = await store.increment(key);
+      expect(result.totalHits).toBe(1);
+    }
+
+    // Still one row each, and every stored key is the fixed width the column
+    // was sized for.
+    const rows = (await connection.query(
+      `SELECT "key" FROM "rate_limit_hit"`,
+    )) as { key: string }[];
+    expect(rows).toHaveLength(hostile.length);
+    for (const row of rows) {
+      expect(row.key).toMatch(/^test:[0-9a-f]{64}$/);
+    }
+
+    // The table is intact, which is the other half of the SQL-ish key above.
+    expect(await store.get(hostile[1])).toBeDefined();
   });
 
   it("forgets a key on reset", async () => {

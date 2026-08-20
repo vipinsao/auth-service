@@ -14,7 +14,15 @@ import { Entity, Column, Index, PrimaryColumn } from "typeorm";
  */
 @Entity()
 export class RateLimitHit {
-  /** `<limiter prefix>:<client key>`, usually an IP address. */
+  /**
+   * `<limiter prefix>:<sha256 of the client key>` - `auth:` plus 64 hex
+   * characters, so 69 or 72 in practice. The client key is hashed by
+   * `PostgresRateLimitStore.scope` precisely so that this column has a fixed
+   * width: it is fed from `req.ip`, which behind a trusted proxy is an
+   * unvalidated, unbounded request header, and an over-long value here is a
+   * `22001` from Postgres and a 500 out of the API. The declared 160 is
+   * headroom for a longer prefix, not room for caller-supplied text.
+   */
   @PrimaryColumn({ type: "varchar", length: 160 })
   key: string;
 
