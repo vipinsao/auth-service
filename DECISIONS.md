@@ -182,3 +182,43 @@ bearer header keeps the service usable from mobile clients and from `curl`.
 **Cost.** Two code paths into the same verification. The cookie domain is
 configurable via `COOKIE_DOMAIN`; it used to be hard-coded to `localhost`, which
 silently broke the cookie in every other environment.
+
+---
+
+## 12. Dependency advisories are fixed, not annotated
+
+**Decision.** `npm audit` must report `found 0 vulnerabilities`. When this branch
+started it reported 19 — 1 critical, 10 high, 6 moderate, 2 low.
+
+**Why.** An advisory list that is carried forward as a README note is a decision
+nobody revisits. Two of the 19 were not theoretical for an auth service:
+`jws@3.2.2` (GHSA-869p-cjfg-cm3x, "Improperly Verifies HMAC Signature") sits
+directly under `jsonwebtoken` and is the code that verifies the HS256 refresh
+tokens, and `handlebars@4.7.8` (GHSA-3mfm-83xf-c92r and seven others, the single
+critical) reaches the build through `ts-jest`.
+
+Eighteen of the 19 were transitive and every fix existed inside the semver range
+the direct dependency already declared, so `npm audit fix` resolved them by
+rewriting `package-lock.json` alone — `package.json` was untouched. That is why
+the direct dependencies mostly carry carets: a caret is what lets an in-range
+security patch be picked up by a lockfile bump instead of a hand edit.
+
+The nineteenth was TypeORM itself — GHSA-9ggv-8w38-r7pm (SQL injection in
+`UpdateQueryBuilder`/`SoftDeleteQueryBuilder` `orderBy`) and GHSA-2rp8-mm9q-fp49
+(`migration:generate` template-literal code injection), both affecting
+`<=0.3.30`. The dependency was pinned at exactly `0.3.27`, so npm called the fix
+"outside the stated dependency range" and refused it without `--force`. It is a
+patch release, not a major one: `0.3.27` → `^0.3.31` clears both advisories with
+no API change. `npm run typecheck`, `npm run build` and all 63 tests pass on
+0.3.31 unmodified.
+
+**Cost.** 52 transitive packages moved in one step, which is a large lockfile
+diff to review. The mitigation is that the whole verification suite
+(`lint:check`, `format:check`, `typecheck`, `build`, `test:ci`) was run after the
+lockfile bump and again after the TypeORM bump, against a real PostgreSQL — the
+lockfile diff is large but it is not unverified.
+
+**Not done.** TypeORM 1.1.0 is published. No advisory requires it: 0.3.31 is the
+fixed version for both TypeORM CVEs, and `0.3.31` is still the `legacy` dist-tag
+rather than an abandoned line. Taking a major version of the ORM with no
+security driver would be risk without a reason, so this stays on 0.3.x.

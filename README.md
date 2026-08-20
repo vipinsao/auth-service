@@ -271,9 +271,13 @@ Things a reader should know before judging this code:
 - **Logout revokes the whole family, not every session.** There is no
   "sign out everywhere" endpoint; a password reset is currently the only thing
   that revokes all of a user's tokens.
-- **`npm audit` reports advisories in transitive dependencies** (TypeORM, `qs`,
-  `uuid`). They are not addressed here because the fixes require major-version
-  bumps that this change set has no way to test properly.
+- **`npm audit` is clean** (`found 0 vulnerabilities`, npm 11.13.0). It
+  previously reported 19 advisories — 1 critical, 10 high, 6 moderate, 2 low.
+  Eighteen were transitive and resolved inside the existing semver ranges by
+  `npm audit fix`; the last one was TypeORM itself (GHSA-9ggv-8w38-r7pm,
+  GHSA-2rp8-mm9q-fp49, both `<=0.3.30`), fixed by moving the direct dependency
+  from `0.3.27` to `^0.3.31`. The full verification suite was re-run after each
+  step. See DECISIONS.md decision 12.
 
 ## License
 
