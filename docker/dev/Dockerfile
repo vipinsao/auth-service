@@ -1,20 +1,17 @@
-# Use the official Node.js image as our base
-FROM node:18
+# Development image. It runs the TypeScript sources through nodemon so the
+# bind-mounted working tree reloads on save; it is not a production image.
+FROM node:24-bookworm-slim
 
-# Set the working directory inside the container
 WORKDIR /usr/src/app
 
-# Copy package.json and package-lock.json first to leverage Docker cache
-COPY package*.json ./
+# Copy the manifests first so `npm ci` is cached until dependencies change.
+COPY package.json package-lock.json ./
+RUN npm ci
 
-# Install app dependencies
-RUN npm install
-
-# Copy the rest of our app's source code into the container
 COPY . .
 
-# Expose the port the app will run on
 EXPOSE 5501
 
-# The command to run our app
-CMD ["npm", "run", "dev"]
+# Generate the RS256 key pair on first boot only, so restarting the container
+# does not invalidate access tokens that are still in flight.
+CMD ["sh", "-c", "[ -f certs/private.pem ] || npm run keys:generate; npm run dev"]

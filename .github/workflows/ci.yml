@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    # The test suite is a real integration suite: it talks to PostgreSQL, drops
+    # the schema between cases and re-creates it from the entity classes.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: authuser
+          POSTGRES_PASSWORD: authpass
+          POSTGRES_DB: authservice_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      NODE_ENV: test
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_USERNAME: authuser
+      DB_PASSWORD: authpass
+      DB_NAME: authservice_test
+      # CI-only value; the real secret lives in the deployment environment.
+      REFRESH_TOKEN_SECRET: ci-only-refresh-secret
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # Access tokens are RS256; the key pair is generated per environment and
+      # never committed.
+      - run: npm run keys:generate
+
+      - run: npm run lint:check
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run test:ci
