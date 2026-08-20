@@ -1,4 +1,5 @@
 import type { CookieOptions, Response } from "express";
+import jwt from "jsonwebtoken";
 import { Config } from "../config/index.js";
 
 /**
@@ -26,14 +27,52 @@ const baseCookieOptions: CookieOptions = {
 
 const ONE_HOUR_MS = 1000 * 60 * 60;
 
+/**
+ * How long the access-token cookie may live: exactly as long as the token
+ * inside it.
+ *
+ * This used to be a hard-coded hour while the token's lifetime came from
+ * `ACCESS_TOKEN_EXPIRY` - two sources of truth for one number, agreeing only at
+ * the default. Set `ACCESS_TOKEN_EXPIRY=15m` and the cookie outlived the token
+ * by forty-five minutes: three quarters of an hour in which the browser keeps
+ * presenting a credential the service will refuse, so the user gets 401s from a
+ * session that looks live instead of being logged out and asked to sign in.
+ *
+ * The lifetime is read off the token rather than re-derived from the config
+ * string, because re-deriving it means a second implementation of
+ * jsonwebtoken's `expiresIn` parsing - "15m", "2 days", "120" - and a second
+ * implementation is a second thing that can drift from the first. The token
+ * already carries the answer as two numbers this service signed a moment ago,
+ * so `decode` is enough; there is nothing here to verify that we did not just
+ * assert ourselves.
+ *
+ * A token carrying no `exp` gets no `maxAge`, which makes it a session cookie
+ * that dies with the browser. That is the safe direction to fail in: shorter
+ * than the credential, never longer.
+ */
+export const accessTokenCookieMaxAge = (
+  accessToken: string,
+): number | undefined => {
+  const decoded = jwt.decode(accessToken);
+  if (decoded === null || typeof decoded !== "object") return undefined;
+
+  const { exp, iat } = decoded as { exp?: unknown; iat?: unknown };
+  if (typeof exp !== "number" || typeof iat !== "number") return undefined;
+  if (exp <= iat) return undefined;
+
+  return (exp - iat) * 1000;
+};
+
 export const setAuthCookies = (
   res: Response,
   accessToken: string,
   refreshToken: string,
 ) => {
+  const maxAge = accessTokenCookieMaxAge(accessToken);
+
   res.cookie("accessToken", accessToken, {
     ...baseCookieOptions,
-    maxAge: ONE_HOUR_MS,
+    ...(maxAge === undefined ? {} : { maxAge }),
   });
   res.cookie("refreshToken", refreshToken, {
     ...baseCookieOptions,

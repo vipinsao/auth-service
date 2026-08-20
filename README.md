@@ -174,7 +174,11 @@ All bodies and responses are JSON. Errors always use the same envelope:
 Access and refresh tokens are set as `httpOnly`, `SameSite=Strict` cookies.
 `secure` is set in every environment except `dev`, `development` and `test` — an
 allow-list of local names rather than of production ones, so an unfamiliar
-`NODE_ENV` gets the strict behaviour instead of quietly dropping the flag.
+`NODE_ENV` gets the strict behaviour instead of quietly dropping the flag. Each
+cookie lives exactly as long as the credential inside it: the access cookie's
+`maxAge` is read off the token's own `exp`/`iat`, so changing
+`ACCESS_TOKEN_EXPIRY` moves both, and the refresh cookie follows
+`REFRESH_TOKEN_EXPIRY_DAYS`.
 `/auth/self` and `/users` also accept `Authorization: Bearer <accessToken>`.
 
 | Method | Path                        | Auth                       | Request body                               | Success                                                                  | Failure                                                                          |

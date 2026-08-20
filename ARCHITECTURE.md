@@ -600,9 +600,29 @@ ordinary doubling below the cap so the clamp cannot quietly flatten it.
 Worth recording how it was found: writing this section required explaining what
 `LEAST` actually bounds, and the explanation did not survive being written down.
 
-**A second, lower-severity mismatch:** the `accessToken` cookie's `maxAge` is
-hard-coded to one hour (`src/utils/cookies.ts:27,36`) while the token's own
-lifetime is `ACCESS_TOKEN_EXPIRY` (`src/config/index.ts:206`). They agree at the
-default and diverge the moment anyone changes the variable — set it to `7d` and
-the browser discards a still-valid token after an hour; set it to `15m` and the
-cookie outlives the token by 45 minutes. One lifetime, two sources of truth.
+**A second, lower-severity mismatch — FIXED.** The `accessToken` cookie's
+`maxAge` was hard-coded to one hour while the token's own lifetime came from
+`ACCESS_TOKEN_EXPIRY` (`src/config/index.ts:206`). They agree at the default and
+diverge the moment anyone changes the variable: set it to `7d` and the browser
+discards a still-valid token after an hour; set it to `15m` and the cookie
+outlives the token by forty-five minutes, during which the browser keeps
+presenting a credential the service refuses — 401s from a session that still
+looks live, rather than being logged out and asked to sign in. One lifetime, two
+sources of truth.
+
+`accessTokenCookieMaxAge` (`src/utils/cookies.ts`) reads the lifetime off the
+token: `(exp - iat) * 1000`, from claims this service signed moments earlier.
+Deriving it from the config string instead would mean a second implementation of
+jsonwebtoken's `expiresIn` parsing — `"15m"`, `"2 days"`, the bare `"120"` that
+means milliseconds — and a second implementation is a second thing that can
+drift from the first. `decode` rather than `verify`, because verifying our own
+signature here would only assert what we just did.
+
+A token carrying no `exp` gets no `maxAge` at all, making it a session cookie
+that dies with the browser: shorter than the credential is the safe direction to
+fail in, longer is the defect.
+
+`tests/unit/cookies.spec.ts` re-imports the config, the token service and the
+cookie helper under three different `ACCESS_TOKEN_EXPIRY` values and asserts the
+cookie's `maxAge` equals the token's own window each time. Against the previous
+code the `15m` case reported 3,600,000 where 900,000 was expected.

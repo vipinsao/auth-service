@@ -248,6 +248,18 @@ bearer header keeps the service usable from mobile clients and from `curl`.
 configurable via `COOKIE_DOMAIN`; it used to be hard-coded to `localhost`, which
 silently broke the cookie in every other environment.
 
+**A cookie's lifetime is the token's lifetime, taken from the token.** The
+access cookie's `maxAge` was hard-coded to an hour while the token expired after
+`ACCESS_TOKEN_EXPIRY` — one number with two sources of truth, agreeing only at
+the default. At `15m` the cookie outlived its own contents by forty-five
+minutes, so the browser kept presenting a credential the service refuses and the
+user collected 401s from a session that looked live. It is now `(exp - iat)`
+read off the token itself. Deriving it from the config string would have meant a
+second implementation of jsonwebtoken's `expiresIn` parsing sitting beside the
+first, which is the same shape of mistake one layer down. A token with no `exp`
+gets no `maxAge` and becomes a session cookie: shorter than the credential is
+the safe direction to fail in.
+
 ---
 
 ## 12. Dependency advisories are fixed, not annotated
