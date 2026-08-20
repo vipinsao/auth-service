@@ -11,6 +11,7 @@ import {
 import app from "../../src/app.js";
 import { AppDataSource } from "../../src/config/data-source.js";
 import { RefreshToken } from "../../src/entity/RefreshToken.js";
+import { TokenService } from "../../src/services/TokenService.js";
 import { asCookieHeader, cookiesFrom, cookieValue } from "../utils/index.js";
 
 const credentials = {
@@ -245,5 +246,156 @@ describe("POST /auth/logout", () => {
   it("should succeed even without a refresh cookie", async () => {
     const response = await request(app).post("/auth/logout");
     expect(response.statusCode).toBe(200);
+  });
+});
+
+/**
+ * Revoking a set of tokens while a rotation of one of them is still in flight.
+ *
+ * The race above proves the lock `rotate` takes; these prove the one the
+ * revokers were missing. Every revocation path in the service - reuse detected
+ * on refresh, logout, and the `revokeAllForUser` a password reset runs - ends
+ * in a bulk `UPDATE ... WHERE revokedAt IS NULL`, and at READ COMMITTED that
+ * statement's snapshot is fixed before the rotation inserts the successor. The
+ * UPDATE blocks on the predecessor, is released when the rotation commits, and
+ * revokes nothing: the predecessor is spent by then and the successor was never
+ * in its snapshot. The family is reported revoked and a live token remains.
+ *
+ * The interleaving is driven by hand rather than raced, because a race that
+ * only reproduces sometimes is a test that only fails sometimes. A second
+ * connection takes the write lock `rotate` would hold, the revoke is started
+ * and confirmed to be waiting on that lock (`pg_stat_activity`), and only then
+ * does the first connection insert the successor and commit.
+ */
+describe("revoking tokens while a rotation is in flight", () => {
+  let connection: DataSource;
+
+  beforeAll(async () => {
+    connection = await AppDataSource.initialize();
+  });
+
+  beforeEach(async () => {
+    await connection.dropDatabase();
+    await connection.synchronize();
+    await request(app).post("/auth/register").send(credentials);
+  });
+
+  afterAll(async () => {
+    await connection.destroy();
+  });
+
+  /** Fails rather than proceeding, so a revoke that did not block cannot pass. */
+  const waitUntilBlocked = async () => {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const rows = (await connection.query(
+        `SELECT count(*)::int AS waiting FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+      )) as { waiting: number }[];
+      if (rows[0].waiting > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error("the revoke never blocked on the locked row");
+  };
+
+  /**
+   * Everything `rotate` does, on a connection this test controls: hold the
+   * write lock on the row being spent, let the revoke queue behind it, then
+   * insert the successor and spend the predecessor in the same transaction.
+   */
+  const rotateByHand = async (predecessor: RefreshToken) => {
+    const runner = connection.createQueryRunner();
+    await runner.connect();
+    await runner.startTransaction();
+    await runner.query(
+      `SELECT "id" FROM "refresh_token" WHERE "id" = $1 FOR UPDATE`,
+      [predecessor.id],
+    );
+
+    return {
+      async finish() {
+        const inserted = (await runner.query(
+          `INSERT INTO "refresh_token" ("userId", "familyId", "expiresAt")
+           VALUES ($1, $2, now() + interval '30 days')
+           RETURNING "id"`,
+          [predecessor.userId, predecessor.familyId],
+        )) as { id: number }[];
+
+        await runner.query(
+          `UPDATE "refresh_token"
+              SET "revokedAt" = now(), "replacedByTokenId" = $2
+            WHERE "id" = $1`,
+          [predecessor.id, inserted[0].id],
+        );
+
+        await runner.commitTransaction();
+        await runner.release();
+        return inserted[0].id;
+      },
+    };
+  };
+
+  const liveToken = async () => {
+    const repository = connection.getRepository(RefreshToken);
+    const row = await repository.findOne({
+      where: { revokedAt: IsNull() },
+      order: { id: "DESC" },
+    });
+    return row!;
+  };
+
+  it("revokes a successor the rotation inserts after the revoke has started", async () => {
+    const repository = connection.getRepository(RefreshToken);
+    const tokenService = new TokenService(repository);
+
+    await login();
+    const predecessor = await liveToken();
+
+    const rotation = await rotateByHand(predecessor);
+
+    const revoked = tokenService.revokeFamily(predecessor.familyId);
+    await waitUntilBlocked();
+
+    const successorId = await rotation.finish();
+    await revoked;
+
+    // Without the lock the revoke reports zero rows changed and this successor
+    // is still live behind a family the service has declared revoked.
+    const successor = await repository.findOne({ where: { id: successorId } });
+    expect(successor!.revokedAt).not.toBeNull();
+    expect(
+      await repository.count({
+        where: { familyId: predecessor.familyId, revokedAt: IsNull() },
+      }),
+    ).toBe(0);
+  });
+
+  /**
+   * The same hole under `revokeAllForUser`, which is the one a password reset
+   * runs. Worst case of the four: the user has just changed their password
+   * because they believe someone else has it, and the attacker keeps a refresh
+   * token good for thirty days.
+   */
+  it("revokes every session of a user, including one mid-rotation", async () => {
+    const repository = connection.getRepository(RefreshToken);
+    const tokenService = new TokenService(repository);
+
+    await login();
+    const predecessor = await liveToken();
+
+    const rotation = await rotateByHand(predecessor);
+
+    const revoked = tokenService.revokeAllForUser(predecessor.userId);
+    await waitUntilBlocked();
+
+    const successorId = await rotation.finish();
+    await revoked;
+
+    const successor = await repository.findOne({ where: { id: successorId } });
+    expect(successor!.revokedAt).not.toBeNull();
+    expect(
+      await repository.count({
+        where: { userId: predecessor.userId, revokedAt: IsNull() },
+      }),
+    ).toBe(0);
   });
 });

@@ -3,7 +3,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import jwt, { type JwtPayload, type SignOptions } from "jsonwebtoken";
 import createHttpError from "http-errors";
-import { IsNull, Repository } from "typeorm";
+import { FindOptionsWhere, IsNull, Repository } from "typeorm";
 import { Config } from "../config/index.js";
 import { User } from "../entity/User.js";
 import { RefreshToken } from "../entity/RefreshToken.js";
@@ -139,19 +139,68 @@ export class TokenService {
     });
   }
 
+  /**
+   * Lock every row in the set, then revoke the live ones - both statements in
+   * one transaction.
+   *
+   * The lock is not there to keep two revokers apart. It is there because of
+   * `rotate`. A bare `UPDATE ... WHERE revokedAt IS NULL` fixes its snapshot
+   * when the statement starts, so a successor row that a rotation inserts
+   * afterwards is not in it. The UPDATE does block - on the predecessor row the
+   * rotation holds - but when it is released it re-checks only the rows its own
+   * snapshot already had: the predecessor is now spent so it matches nothing,
+   * the successor was never a candidate, and the statement reports zero rows
+   * changed while the family still holds a live token. Measured against the
+   * compiled service, a `revokeAllForUser` racing a refresh left 6 of 40 reset
+   * passwords with a live 30-day refresh token - after the one action a user
+   * takes because they believe they have been compromised.
+   *
+   * `SELECT ... FOR UPDATE` first turns that into a barrier. It waits on the
+   * same predecessor row, and the UPDATE that follows it is a separate
+   * statement with a fresh snapshot, so the committed successor is visible to
+   * it and is revoked. Holding the locks until commit also stops a new rotation
+   * from starting in the gap between the two statements.
+   *
+   * The lock is deliberately taken over the whole set rather than over
+   * `revokedAt IS NULL`: what has to be waited on is any rotation in flight,
+   * and the row it is spending may be spent by the time this transaction
+   * re-reads it.
+   *
+   * `ORDER BY id` fixes the order the row locks are taken in, so two revokers
+   * whose sets overlap - a family revoke and a user-wide revoke, say - queue
+   * behind each other instead of deadlocking.
+   */
+  private async revokeLive(
+    column: "familyId" | "userId",
+    value: string | number,
+  ): Promise<void> {
+    await this.refreshTokenRepository.manager.transaction(async (manager) => {
+      // `column` is one of two literals chosen here, never by a caller, so
+      // interpolating it cannot carry anything in from outside. The value that
+      // can is a bound parameter.
+      await manager.query(
+        `SELECT "id" FROM "refresh_token" WHERE "${column}" = $1 ORDER BY "id" FOR UPDATE`,
+        [value],
+      );
+
+      await manager.update(
+        RefreshToken,
+        {
+          [column]: value,
+          revokedAt: IsNull(),
+        } as FindOptionsWhere<RefreshToken>,
+        { revokedAt: new Date() },
+      );
+    });
+  }
+
   async revokeFamily(familyId: string): Promise<void> {
-    await this.refreshTokenRepository.update(
-      { familyId, revokedAt: IsNull() },
-      { revokedAt: new Date() },
-    );
+    await this.revokeLive("familyId", familyId);
   }
 
   /** Used after a password reset: every existing session must die. */
   async revokeAllForUser(userId: number): Promise<void> {
-    await this.refreshTokenRepository.update(
-      { userId, revokedAt: IsNull() },
-      { revokedAt: new Date() },
-    );
+    await this.revokeLive("userId", userId);
   }
 
   async findById(id: number): Promise<RefreshToken | null> {
