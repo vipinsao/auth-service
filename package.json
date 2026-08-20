@@ -2,7 +2,7 @@
   "name": "auth-service",
   "version": "1.0.0",
   "description": "Production-shaped authentication service: JWT access tokens, rotating refresh tokens with reuse detection, RBAC.",
-  "license": "ISC",
+  "license": "MIT",
   "author": "Vipin Sao",
   "type": "module",
   "main": "build/server.js",
