@@ -157,6 +157,35 @@ describe("POST /auth/register", () => {
       expect(users).toHaveLength(0);
     });
 
+    /**
+     * A minimum length of 8 does nothing about the passwords an attacker
+     * actually tries first: `password` is exactly eight characters and passed.
+     */
+    it("should reject a password that is merely long enough", async () => {
+      for (const password of ["password", "12345678", "qwerty123"]) {
+        const response = await request(app)
+          .post("/auth/register")
+          .send({ ...userData, password });
+
+        expect(response.statusCode).toBe(400);
+      }
+
+      expect(await connection.getRepository(User).find()).toHaveLength(0);
+    });
+
+    it("should reject a password built from the email address", async () => {
+      const response = await request(app)
+        .post("/auth/register")
+        .send({
+          ...userData,
+          email: "alice@example.com",
+          password: "alice-1234",
+        });
+
+      expect(response.statusCode).toBe(400);
+      expect(await connection.getRepository(User).find()).toHaveLength(0);
+    });
+
     it("should return the failures in an errors array", async () => {
       const response = await request(app)
         .post("/auth/register")

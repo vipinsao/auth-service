@@ -32,24 +32,31 @@ app.set("trust proxy", Config.TRUST_PROXY);
 // First, so that even a 404 or a rejected request carries a request id.
 app.use(requestContext);
 
-// Swagger UI needs inline styles and scripts, so it gets its own relaxed CSP
-// rather than loosening the policy for the whole API. It is mounted before the
-// global helmet and terminates the request, so the strict policy never applies.
-app.use(
-  "/api-docs",
-  helmet({
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        styleSrc: ["'self'", "'unsafe-inline'"],
-        scriptSrc: ["'self'", "'unsafe-inline'"],
-        imgSrc: ["'self'", "data:"],
+// Swagger UI enumerates every endpoint, its parameters and its request bodies.
+// Locally that is the point; on a public deployment it is a free map of the
+// attack surface, so it is mounted only when ENABLE_API_DOCS says so, which
+// defaults to local environments.
+//
+// It needs inline styles and scripts, so it gets its own relaxed CSP rather
+// than loosening the policy for the whole API. Being mounted before the global
+// helmet, and terminating the request, means the strict policy never applies.
+if (Config.ENABLE_API_DOCS) {
+  app.use(
+    "/api-docs",
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          styleSrc: ["'self'", "'unsafe-inline'"],
+          scriptSrc: ["'self'", "'unsafe-inline'"],
+          imgSrc: ["'self'", "data:"],
+        },
       },
-    },
-  }),
-  swaggerUi.serve,
-  swaggerUi.setup(openApiDocument),
-);
+    }),
+    swaggerUi.serve,
+    swaggerUi.setup(openApiDocument),
+  );
+}
 
 app.use(helmet());
 app.use(

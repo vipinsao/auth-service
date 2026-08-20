@@ -5,6 +5,7 @@ access tokens, rotating refresh tokens with reuse detection, password reset,
 email verification and role-based access control, backed by PostgreSQL.
 
 - API documentation (Swagger UI): `/api-docs` when the service is running
+  (served in dev/test by default; set `ENABLE_API_DOCS=true` to expose it elsewhere)
 - Design rationale: [DECISIONS.md](./DECISIONS.md)
 
 ## Architecture
@@ -116,28 +117,42 @@ All bodies and responses are JSON. Errors always use the same envelope:
 }
 ```
 
-Access and refresh tokens are set as `httpOnly`, `SameSite=Strict` cookies
-(`secure` when `NODE_ENV=prod`). `/auth/self` and `/users` also accept
-`Authorization: Bearer <accessToken>`.
+Access and refresh tokens are set as `httpOnly`, `SameSite=Strict` cookies.
+`secure` is set in every environment except `dev`, `development` and `test` — an
+allow-list of local names rather than of production ones, so an unfamiliar
+`NODE_ENV` gets the strict behaviour instead of quietly dropping the flag.
+`/auth/self` and `/users` also accept `Authorization: Bearer <accessToken>`.
 
-| Method | Path                        | Auth                       | Request body                               | Success                                                                  | Failure                                                                         |
-| ------ | --------------------------- | -------------------------- | ------------------------------------------ | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
-| POST   | `/auth/register`            | none                       | `{ firstName, lastName, email, password }` | `201 { userId }` + cookies                                               | `400` validation / email taken, `429`                                           |
-| POST   | `/auth/login`               | none                       | `{ email, password }`                      | `200 { id }` + cookies                                                   | `400` bad credentials, `403` unverified email (when gated), `423` locked, `429` |
-| POST   | `/auth/refresh`             | `refreshToken` cookie      | none                                       | `200 { id }` + new cookies                                               | `401` missing / invalid / expired / replayed, `429`                             |
-| POST   | `/auth/logout`              | `refreshToken` cookie      | none                                       | `200 { success: true }`                                                  | —                                                                               |
-| GET    | `/auth/self`                | access token               | none                                       | `200 { id, firstName, lastName, email, role, emailVerified, createdAt }` | `401`                                                                           |
-| POST   | `/auth/forgot-password`     | none                       | `{ email }`                                | `202 { success: true }`                                                  | `400` validation                                                                |
-| POST   | `/auth/reset-password`      | none                       | `{ token, password }`                      | `200 { success: true }`                                                  | `400` invalid / used / expired                                                  |
-| POST   | `/auth/verify-email`        | none                       | `{ token }`                                | `200 { success: true }`                                                  | `400` invalid / used / expired, `429`                                           |
-| POST   | `/auth/resend-verification` | none                       | `{ email }`                                | `202 { success: true }`                                                  | `400` validation                                                                |
-| GET    | `/users`                    | access token, role `admin` | none                                       | `200 { users: [...] }`                                                   | `401`, `403`                                                                    |
-| GET    | `/health`                   | none                       | none                                       | `200 { status: "ok", uptimeSeconds }`                                    | —                                                                               |
-| GET    | `/ready`                    | none                       | none                                       | `200 { status: "ready", database: "up" }`                                | `503` database unreachable                                                      |
-| GET    | `/api-docs`                 | none                       | none                                       | Swagger UI                                                               | —                                                                               |
+| Method | Path                        | Auth                       | Request body                               | Success                                                                  | Failure                                                                          |
+| ------ | --------------------------- | -------------------------- | ------------------------------------------ | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| POST   | `/auth/register`            | none                       | `{ firstName, lastName, email, password }` | `201 { userId }` + cookies                                               | `400` validation / email taken, `429`                                            |
+| POST   | `/auth/login`               | none                       | `{ email, password }`                      | `200 { id }` + cookies                                                   | `400` bad credentials, `403` unverified email (when gated), `423` locked¹, `429` |
+| POST   | `/auth/refresh`             | `refreshToken` cookie      | none                                       | `200 { id }` + new cookies                                               | `401` missing / invalid / expired / replayed, `429`                              |
+| POST   | `/auth/logout`              | `refreshToken` cookie      | none                                       | `200 { success: true }`                                                  | —                                                                                |
+| GET    | `/auth/self`                | access token               | none                                       | `200 { id, firstName, lastName, email, role, emailVerified, createdAt }` | `401`                                                                            |
+| POST   | `/auth/forgot-password`     | none                       | `{ email }`                                | `202 { success: true }`                                                  | `400` validation                                                                 |
+| POST   | `/auth/reset-password`      | none                       | `{ token, password }`                      | `200 { success: true }`                                                  | `400` invalid / used / expired                                                   |
+| POST   | `/auth/verify-email`        | none                       | `{ token }`                                | `200 { success: true }`                                                  | `400` invalid / used / expired, `429`                                            |
+| POST   | `/auth/resend-verification` | none                       | `{ email }`                                | `202 { success: true }`                                                  | `400` validation                                                                 |
+| GET    | `/users`                    | access token, role `admin` | none                                       | `200 { users: [...] }`                                                   | `401`, `403`                                                                     |
+| GET    | `/health`                   | none                       | none                                       | `200 { status: "ok", uptimeSeconds }`                                    | —                                                                                |
+| GET    | `/ready`                    | none                       | none                                       | `200 { status: "ready", database: "up" }`                                | `503` database unreachable                                                       |
+| GET    | `/api-docs`                 | none                       | none                                       | Swagger UI (dev/test only unless `ENABLE_API_DOCS=true`)                 | `404` when disabled                                                              |
 
 `/auth/forgot-password` and `/auth/resend-verification` answer `202` whether or
 not the address exists, so they cannot be used to enumerate accounts.
+
+¹ `423` is returned only to a caller who supplied the **correct** password for a
+locked account. A wrong password gets the same `400` whether the address exists,
+does not exist, or is locked — otherwise `423` would answer "does this account
+exist?" for anyone willing to send five failures. For the same reason a login
+for an unknown address still performs a bcrypt comparison, so it takes the same
+time as one for a real account.
+
+Login is also protected by a per-account lockout that starts at one minute and
+doubles with each further failure up to fifteen, rather than a flat fifteen —
+see [DECISIONS.md](./DECISIONS.md) decision 6, which is candid about what that
+does and does not fix.
 
 Every response carries an `x-request-id` header. Supply your own and it is
 echoed back and used in the logs for that request.
@@ -168,8 +183,9 @@ half-built schema.
 ```bash
 npm install
 npm run keys:generate          # writes certs/private.pem and certs/public.pem (gitignored)
-cp .env.example .env.dev       # then fill in the values
-createdb authservice_dev       # or any empty database matching DB_NAME
+cp .env.example .env.dev       # the database values are already filled in
+cp .env.example .env.test      # then change DB_NAME to authservice_test
+npm run db:local               # in its own terminal - see below
 npm run migration:run          # creates the schema
 npm run dev                    # http://localhost:5501
 ```
@@ -177,6 +193,21 @@ npm run dev                    # http://localhost:5501
 The database has to exist and be migrated before the service starts:
 `synchronize` is on only under `NODE_ENV=test`, so nothing builds the schema
 implicitly.
+
+### A database with no prerequisites
+
+If PostgreSQL is not installed, `npm run db:local` starts a real one - a
+platform PostgreSQL binary shipped by `embedded-postgres`, run out of
+`.postgres/` in this repository. No Docker, no system package, nothing to
+install or pay for. It also creates `authservice_dev` and `authservice_test`,
+which are the databases `.env.example` points at.
+
+It runs in the foreground, so give it its own terminal; Ctrl-C stops it and the
+data stays in `.postgres/` until that directory is deleted. If port 5432 is
+taken, `DB_PORT=5433 npm run db:local` and set `DB_PORT` to match in
+`.env.dev` and `.env.test`.
+
+Already have PostgreSQL? Ignore all of this and point `.env.dev` at it.
 
 ### Database migrations
 
@@ -211,7 +242,15 @@ Configuration is read from `.env.$NODE_ENV` — `.env.dev`, `.env.test`,
 precedence over the file, which is why the Compose and CI setups do not ship
 one. `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSWORD`, `DB_NAME` and
 `REFRESH_TOKEN_SECRET` are mandatory: the process refuses to start without them.
-Every variable is listed and commented in [.env.example](./.env.example).
+Outside `dev`/`development`/`test` it also refuses to start if
+`REFRESH_TOKEN_SECRET` is under 32 characters or is one of the example values in
+this repository. Every variable is listed and commented in
+[.env.example](./.env.example).
+
+`npm run dev` watches `src/` and `tests/` only, so editing `.env.dev` while it is
+running has no effect until you restart it. nodemon is configured with
+`exitcrash`, so a fatal startup error - a bad environment value, an unreachable
+database - stops it instead of leaving it idling.
 
 ### Rate limiting across replicas
 
@@ -257,8 +296,16 @@ All three options are free:
 - `smtp` — any SMTP server, via `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`,
   `SMTP_USER`, `SMTP_PASSWORD`.
 
+The default is `json`, which means **password reset and email verification send
+nothing to anyone** until you change it. That is right for local work and wrong
+everywhere else, so the service logs a warning the first time it tries to send
+mail under the default transport.
+
 The `json` and `ethereal` transports have both been run end to end from this
 repository; `smtp` has not. See "Notes and limitations".
+
+The Ethereal preview URL opens the message itself, so for a password reset it is
+a working reset link. It is written to the log only in local environments.
 
 ## Running the tests
 

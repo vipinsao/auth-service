@@ -1,4 +1,5 @@
 import { checkSchema } from "express-validator";
+import { passwordSchema } from "./password-rules.js";
 
 export default checkSchema({
   token: {
@@ -10,13 +11,5 @@ export default checkSchema({
       errorMessage: "Token is malformed",
     },
   },
-  password: {
-    trim: true,
-    errorMessage: "Password is required",
-    notEmpty: true,
-    isLength: {
-      options: { min: 8, max: 128 },
-      errorMessage: "Password must be between 8 and 128 characters long",
-    },
-  },
+  password: passwordSchema,
 });

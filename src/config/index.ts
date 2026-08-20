@@ -38,6 +38,47 @@ if (missing.length > 0) {
   );
 }
 
+/**
+ * A refresh token is accepted on the strength of this secret alone, and its
+ * `jti` is the row's sequential integer id - so anyone holding the secret can
+ * mint a token for `jti = 1, 2, 3...` and land on real sessions belonging to
+ * other users. That makes a weak or left-over-from-the-example secret a full
+ * account-takeover, not a hardening detail, which is why this refuses to start
+ * rather than warning.
+ *
+ * Local environments are exempt: the committed Compose file and CI both use an
+ * obviously fake value on purpose, and making them fail would only teach people
+ * to work around the check.
+ */
+const PLACEHOLDER_SECRETS = new Set([
+  "local-only-change-me",
+  "local-compose-refresh-secret-change-me",
+  "ci-only-refresh-secret",
+  "change-me",
+  "secret",
+]);
+
+const MINIMUM_SECRET_LENGTH = 32;
+
+const assertUsableSecret = (secret: string, isLocal: boolean) => {
+  if (isLocal) return;
+
+  if (PLACEHOLDER_SECRETS.has(secret)) {
+    throw new Error(
+      "REFRESH_TOKEN_SECRET is one of the example values shipped with this " +
+        "repository. Generate a real one, e.g. `openssl rand -base64 48`.",
+    );
+  }
+
+  if (secret.length < MINIMUM_SECRET_LENGTH) {
+    throw new Error(
+      `REFRESH_TOKEN_SECRET must be at least ${MINIMUM_SECRET_LENGTH} ` +
+        `characters outside development; it is ${secret.length}. ` +
+        "Generate one with `openssl rand -base64 48`.",
+    );
+  }
+};
+
 const csv = (value: string | undefined, fallback: string[]): string[] =>
   value
     ? value
@@ -65,6 +106,9 @@ const num = (value: string | undefined, fallback: number): number => {
  * cookie needs HTTPS, instead of a production cookie shipped without `secure`.
  */
 const LOCAL_ENVIRONMENTS = ["dev", "development", "test"];
+const IS_LOCAL = LOCAL_ENVIRONMENTS.includes(NODE_ENV);
+
+assertUsableSecret(process.env.REFRESH_TOKEN_SECRET as string, IS_LOCAL);
 
 /**
  * `trust proxy` decides whether Express believes `X-Forwarded-For`, and
@@ -95,7 +139,7 @@ export const Config = {
   // production spellings, and both places that used it - the `secure` cookie
   // flag and the 5xx message gate - failed open on any value that was not on
   // the list. Removing it stops the next person reaching for it.
-  IS_LOCAL: LOCAL_ENVIRONMENTS.includes(NODE_ENV),
+  IS_LOCAL,
   IS_TEST: NODE_ENV === "test",
   PORT: num(process.env.PORT, 5501),
   LOG_LEVEL: process.env.LOG_LEVEL ?? "info",
@@ -117,6 +161,16 @@ export const Config = {
 
   // Proxying
   TRUST_PROXY: trustProxy(process.env.TRUST_PROXY),
+
+  /**
+   * Swagger UI enumerates every endpoint and its request shape. That is
+   * exactly what you want locally and a free reconnaissance page in a
+   * deployment, so it defaults to local-only and has to be turned on
+   * deliberately.
+   */
+  ENABLE_API_DOCS: process.env.ENABLE_API_DOCS
+    ? process.env.ENABLE_API_DOCS === "true"
+    : IS_LOCAL,
 
   // Cookies / CORS
   COOKIE_DOMAIN: process.env.COOKIE_DOMAIN || undefined,

@@ -15,6 +15,15 @@ export interface SentMessage {
  * transports.
  */
 const outbox: SentMessage[] = [];
+
+/**
+ * The outbox is a debugging aid, not storage, and it used to grow without
+ * limit - one entry per mail for the lifetime of the process, each holding the
+ * full body including a live password-reset link. Keeping the most recent
+ * messages is all the tests or a developer ever look at.
+ */
+const OUTBOX_LIMIT = 100;
+
 export const getOutbox = (): readonly SentMessage[] => outbox;
 export const clearOutbox = () => {
   outbox.length = 0;
@@ -30,6 +39,18 @@ let transporter: Transporter | undefined;
  */
 const getTransporter = async (): Promise<Transporter> => {
   if (transporter) return transporter;
+
+  // Said once, at the point the first mail is actually attempted. The default
+  // transport delivers nothing, which means password reset and email
+  // verification silently do not work in the default configuration - fine for
+  // local work and a broken security flow anywhere else.
+  if (Config.MAIL_TRANSPORT === "json" && !Config.IS_TEST) {
+    logger.warn(
+      "MAIL_TRANSPORT=json: mail is logged, not delivered. Password reset and " +
+        "email verification links will not reach anyone. Set MAIL_TRANSPORT to " +
+        "ethereal or smtp to send for real.",
+    );
+  }
 
   if (Config.MAIL_TRANSPORT === "smtp") {
     transporter = nodemailer.createTransport({
@@ -69,13 +90,22 @@ export class MailService {
 
     if (Config.MAIL_TRANSPORT === "json") {
       outbox.push({ to, subject, text });
-      logger.info("Mail captured by json transport", { to, subject });
+      if (outbox.length > OUTBOX_LIMIT) outbox.shift();
+      logger.info("Mail captured by json transport - not delivered", {
+        to,
+        subject,
+      });
     }
     if (Config.MAIL_TRANSPORT === "ethereal") {
+      // The preview URL opens the message itself, so for a password reset it is
+      // a working reset link sitting in the log. Ethereal is a local-only
+      // convenience, so the URL is logged only where that is what it is for.
       logger.info("Mail sent", {
         to,
         subject,
-        preview: nodemailer.getTestMessageUrl(info),
+        ...(Config.IS_LOCAL
+          ? { preview: nodemailer.getTestMessageUrl(info) }
+          : {}),
       });
     }
   }

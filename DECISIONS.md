@@ -17,8 +17,8 @@ that last one under concurrency; an application-level check does not — see
 decision 7. `ON DELETE CASCADE` means deleting a user cannot leave live tokens
 behind pointing at nothing.
 
-**Cost.** A schema to keep in step with the code, which is what makes decision 8
-(migrations) unfinished business rather than a nicety.
+**Cost.** A schema to keep in step with the code, which is what decision 8
+(migrations) exists to manage.
 
 ---
 
@@ -33,9 +33,9 @@ tests drop the schema and rebuild it from the same classes the application runs
 against, so no fixture SQL can drift away from the code.
 
 **Cost.** TypeORM's query builder is weaker than Prisma's generated client, and
-`synchronize` is unsafe in production, which is why it is switched off there
-(`src/config/data-source.ts`) — and why the service currently has no supported
-way to create a production schema.
+`synchronize` is unsafe anywhere that holds data, so it is limited to
+`NODE_ENV=test` (`src/config/data-source.ts`). Every other environment is built
+by the migrations in `src/migrations/` — see decision 8.
 
 ---
 
@@ -103,9 +103,44 @@ botnet spreading one attempt per address across thousands of hosts. An account
 lockout does nothing against credential stuffing that tries one password against
 a million different accounts. Each covers the other's blind spot.
 
-**Cost.** The lockout is a denial-of-service primitive: anyone who knows an email
-address can lock that account for `ACCOUNT_LOCK_MINUTES`. The lock is
-time-boxed rather than permanent for exactly that reason.
+**Cost, and what was done about it.** The lockout is a denial-of-service
+primitive. Anyone who knows an address can spend five requests and take that
+account offline. That is not a hypothetical: it is the cheapest attack in this
+service, it needs no credentials, and the victim cannot distinguish it from
+having forgotten their own password.
+
+Three changes narrow it, none of which needs infrastructure:
+
+1. **The lock is progressive, not flat.** It starts at
+   `ACCOUNT_LOCK_INITIAL_MINUTES` (1) and doubles per further failure up to
+   `ACCOUNT_LOCK_MINUTES` (15). The case that actually happens - a real user
+   mistyping, or a drive-by that fires five requests and leaves - now costs a
+   minute instead of a quarter of an hour, a fifteen-fold reduction. A
+   determined attacker still climbs to the cap, which is the point: the
+   defence against sustained guessing is unchanged.
+2. **The lock is no longer visible to someone who does not know the password.**
+   It used to be checked before the password, so five failures against a
+   guessed address returned 400 if nobody owned it and 423 if somebody did -
+   a six-request account-existence oracle. The check now happens after the
+   password has been proved correct, so a wrong guess gets the same generic 400
+   whatever the account's state.
+3. **The counter is incremented in the database, not in application code.** It
+   was `user.failedLoginAttempts + 1` computed from a row read earlier in the
+   request, so two simultaneous failures both read 3 and both wrote 4. An
+   attacker sending guesses in parallel never tripped the cap at all - the
+   lockout was, in the case that mattered, not working.
+
+**Residual risk, stated plainly.** An attacker willing to keep sending traffic
+can still hold an account at the 15-minute cap indefinitely. Closing that needs
+the ability to tell the legitimate user apart from the attacker, and every way
+of doing so costs something this service does not currently have: per-source
+counters that only lock the guessing source (defeated by a botnet, which is what
+the lockout exists for), a device cookie issued on successful login (does not
+help a user on a new device), or a second factor (the real answer, and a much
+larger feature). The honest position is that the lockout trades a
+hard-to-exploit credential attack for an easy-to-exploit availability attack,
+that the trade is the conventional one, and that the sharp edge has been filed
+down rather than removed.
 
 ---
 
@@ -306,3 +341,109 @@ depends on the database being up. Expired rows are swept at most once per window
 by whichever request notices, so there is no scheduler; a failed sweep is logged
 and ignored, because leaving stale rows behind is housekeeping and failing the
 user's request would be an outage.
+
+---
+
+## 14. `trust proxy` is off unless someone says otherwise, and rate-limit keys are hashed
+
+**Decision.** `app.set("trust proxy", ...)` comes from `TRUST_PROXY` and
+defaults to `false`. The Postgres rate-limit store hashes the client key before
+storing it.
+
+**Why.** `req.ip` is what both limiters count against. With `trust proxy` on,
+`req.ip` is taken from `X-Forwarded-For`, a header the caller sends. Nothing in
+the shipped Compose stack strips or sets that header, so it was hard-coded to
+trust a value any client could choose — meaning a caller could pick their own
+rate-limit bucket, use a fresh one per request, and never be throttled at all.
+The limiter was decorative against anyone who read the source.
+
+Express also does not check the value is an address. That turned a broken
+limiter into an outage: the key went into a `varchar(160)` primary key, so an
+`X-Forwarded-For` of a couple of hundred characters made Postgres raise `22001`,
+`increment()` reject, and express-rate-limit hand the rejection to `next(err)` —
+an unauthenticated 500 on every credential endpoint, from one header. Each
+distinct forged value also left a durable row in the auth database, which the
+in-memory store had bounded by RAM and cleared on restart.
+
+Defaulting to `false` is the fix; hashing the key is the reason the column can
+never be the failure mode again whatever feeds it. **Hashing rather than
+truncating**, because two long values that truncate to the same string would let
+an attacker land in a chosen victim's bucket deliberately — the hash is there
+for a fixed width and collision resistance, not secrecy, since the input is a
+public IP address.
+
+**Cost.** A deployment genuinely behind a load balancer must now set
+`TRUST_PROXY=1`, and if it forgets, every client behind that balancer shares one
+bucket and gets throttled together. That failure is loud and hits the operator
+immediately, which is the right direction: the alternative failed silently and
+only hit the users being protected. The stored key also no longer shows which
+address a row belongs to — `SELECT encode(sha256('1.2.3.4'), 'hex')` recovers it
+when debugging.
+
+---
+
+## 15. Hardening is keyed off "is this local", never "is this production"
+
+**Decision.** `Config.IS_LOCAL` is an allow-list of local environment names
+(`dev`, `development`, `test`). Every protection is written as `!IS_LOCAL`.
+There is no `IS_PRODUCTION`.
+
+**Why.** There was one, and it was an allow-list of production spellings:
+`NODE_ENV === "prod" || NODE_ENV === "production"`. Two things depended on it —
+the `secure` flag on the session cookies, and whether a 5xx response returns its
+real message. Under `NODE_ENV=staging`, or `Production`, or a value with a
+trailing space, both answered "not production": session cookies went out over
+plain HTTP, and raw driver errors with table and column names went back to
+unauthenticated callers.
+
+Both are failures nobody notices, because the service keeps working. Inverting
+the allow-list inverts the failure: an unrecognised environment is treated as
+deployed and gets the strict behaviour, so the worst case is a developer whose
+cookie will not set over `http://` — visible in seconds, and fixed by naming the
+environment properly.
+
+`REFRESH_TOKEN_SECRET` uses the same direction. Outside local environments the
+process refuses to start if the secret is shorter than 32 characters or is one
+of the example values in this repository. That is a refusal rather than a
+warning because the `jti` in a refresh token is the row's sequential integer id:
+anyone holding the secret can mint a token for `jti = 1, 2, 3…` and land on real
+sessions belonging to other people. A guessable secret is full account takeover,
+not a hardening detail.
+
+**Cost.** A deployment that uses an unusual `NODE_ENV` gets the strict path
+whether it wanted it or not, and the boot-time secret check is one more way for
+a deploy to fail. Both are deliberate: a deploy that fails is cheaper than a
+deploy that silently ships an insecure cookie.
+
+**Not done.** The sequential `jti` is still sequential. Making it a UUID would
+add real defence in depth — a leaked secret would then also require guessing
+which token ids exist — and it needs a column, a migration and a change to how
+rotation links rows. It is the next thing to do here, and it is written down
+rather than quietly left.
+
+---
+
+## 16. The database is part of the repository
+
+**Decision.** `embedded-postgres` is a committed development dependency, and
+`npm run db:local` starts a real PostgreSQL out of `.postgres/`.
+
+**Why.** The test suite is an integration suite: 81 of its assertions talk to a
+database, and without one the correct response to `git clone` is an error. That
+put "install PostgreSQL, or install Docker" between a reader and any evidence
+that this code works — the single largest obstacle to anyone evaluating it.
+
+`embedded-postgres` ships an actual PostgreSQL binary for the host platform. No
+Docker, no system package, no service, nothing to pay for. The suite and both
+migration directions were run against it to confirm it is a real database and
+not a stub.
+
+It runs in the foreground deliberately. A backgrounded database leaves a PID
+file, a stale lock and a "why is this port taken" puzzle for the next session;
+`Ctrl-C` here is the entire lifecycle.
+
+**Cost.** About 60MB of platform binary in `node_modules`, and the package has
+never published a non-beta — `latest` is `18.4.0-beta.17`, which is why it is
+pinned exactly rather than caret-ranged. It is a development dependency: CI uses
+the `postgres` service in the workflow and Compose uses its own container, so
+neither the build nor the deployed image goes near it.

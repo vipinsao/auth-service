@@ -2,5 +2,6 @@
   "watch": ["src", "tests"],
   "ext": "ts,json,js",
   "ignore": ["node_modules"],
+  "exitcrash": true,
   "exec": "node --loader ts-node/esm --no-warnings=ExperimentalWarning src/server.ts"
 }
