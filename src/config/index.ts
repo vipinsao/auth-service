@@ -84,6 +84,7 @@ export const Config = {
     15,
   ),
   AUTH_RATE_LIMIT_MAX: num(process.env.AUTH_RATE_LIMIT_MAX, 20),
+  REFRESH_RATE_LIMIT_MAX: num(process.env.REFRESH_RATE_LIMIT_MAX, 120),
   MAX_FAILED_LOGIN_ATTEMPTS: num(process.env.MAX_FAILED_LOGIN_ATTEMPTS, 5),
   ACCOUNT_LOCK_MINUTES: num(process.env.ACCOUNT_LOCK_MINUTES, 15),
 

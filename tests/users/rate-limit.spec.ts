@@ -40,4 +40,24 @@ describe("Per-IP rate limiting on /auth", () => {
     expect(throttled.statusCode).toBe(429);
     expect(throttled.body.errors[0].type).toBe("TooManyRequestsError");
   });
+
+  /**
+   * /auth/refresh has its own budget, so spending the credential budget above
+   * must not have spent this one - that separation is the reason the endpoint
+   * could be limited at all without throttling ordinary users behind a NAT.
+   */
+  it("meters /auth/refresh on a separate, larger budget", async () => {
+    const attempt = () => request(app).post("/auth/refresh");
+
+    for (let i = 0; i < Config.REFRESH_RATE_LIMIT_MAX; i++) {
+      const response = await attempt();
+      // No cookie, so every one of these is rejected on its merits, not by the
+      // limiter - which is what makes the 429 below attributable to the limiter.
+      expect(response.statusCode).toBe(401);
+    }
+
+    const throttled = await attempt();
+    expect(throttled.statusCode).toBe(429);
+    expect(throttled.body.errors[0].type).toBe("TooManyRequestsError");
+  });
 });

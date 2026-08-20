@@ -6,7 +6,7 @@ import express, {
 import { authController, tokenService } from "../container.js";
 import { validateRequest } from "../middlewares/validateRequest.js";
 import { authenticate } from "../middlewares/authenticate.js";
-import { authLimiter } from "../middlewares/rateLimiters.js";
+import { authLimiter, refreshLimiter } from "../middlewares/rateLimiters.js";
 import registerValidator from "../validators/register-validator.js";
 import loginValidator from "../validators/login-validator.js";
 import emailValidator from "../validators/email-validator.js";
@@ -33,10 +33,18 @@ router.post(
     authController.login(req, res, next),
 );
 
-router.post("/refresh", (req: Request, res: Response, next: NextFunction) =>
-  authController.refresh(req, res, next),
+// No validator: the only input is the refreshToken cookie, and the controller
+// verifies its signature before it is used for anything.
+router.post(
+  "/refresh",
+  refreshLimiter,
+  (req: Request, res: Response, next: NextFunction) =>
+    authController.refresh(req, res, next),
 );
 
+// Deliberately unlimited. Logout revokes rather than mints, an unusable cookie
+// costs one signature check and no query, and refusing a logout leaves a
+// session alive that the user asked to end - the wrong way for this to fail.
 router.post("/logout", (req: Request, res: Response, next: NextFunction) =>
   authController.logout(req, res, next),
 );
@@ -68,6 +76,7 @@ router.post(
 
 router.post(
   "/verify-email",
+  authLimiter,
   tokenValidator,
   validateRequest,
   (req: Request, res: Response, next: NextFunction) =>

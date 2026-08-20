@@ -16,8 +16,8 @@ flowchart LR
     subgraph Service["auth-service (Express 5)"]
         direction TB
         MW["Middleware chain<br/>requestContext → helmet → cors<br/>→ json(16kb) → cookieParser"]
-        RL["authLimiter<br/>per-IP rate limit"]
-        V["express-validator<br/>+ validateRequest"]
+        RL["per-IP rate limit<br/>authLimiter · refreshLimiter"]
+        V["express-validator<br/>+ validateRequest<br/>(routes with a body)"]
         C["AuthController<br/>UserController"]
         S["UserService · TokenService<br/>CredentialService<br/>VerificationTokenService<br/>MailService"]
         EH["errorHandler<br/>single error envelope"]
@@ -27,6 +27,8 @@ flowchart LR
     SMTP["Mail transport<br/>json / Ethereal / SMTP"]
 
     Client -->|"cookies or Bearer"| MW --> RL --> V --> C --> S
+    RL -.->|"/auth/refresh<br/>no body to validate"| C
+    MW -.->|"/auth/logout<br/>deliberately unlimited"| C
     S --> DB
     S --> SMTP
     C -.->|"next(err)"| EH -.-> Client
@@ -41,8 +43,18 @@ the integration tests drive the app with supertest without binding a port.
 injects the repositories, so the controllers and services can be unit tested with
 plain fakes. A request passes through `requestContext` (correlation id and a
 winston child logger), `helmet`, a CORS allowlist, a 16 kB JSON body cap and
-`cookieParser`, then through the per-IP `authLimiter` and the express-validator
-schema for that route before it reaches a controller in `src/controllers/`.
+`cookieParser`, then through a per-IP rate limiter and, if the route takes a
+body, the express-validator schema for that route, before it reaches a
+controller in `src/controllers/`.
+
+Two routes take a different path and it is worth knowing which. `POST
+/auth/refresh` has no body to validate — its only input is the `refreshToken`
+cookie, whose signature the controller checks before using it — so it is
+rate-limited but has no validator, and it uses `refreshLimiter` rather than
+`authLimiter` so that machine-driven refresh traffic and human login traffic
+cannot exhaust each other's budget. `POST /auth/logout` has neither: it revokes
+rather than mints, an unusable cookie costs one signature check and no query,
+and refusing a logout would leave alive the session the user asked to end.
 Controllers hold only orchestration; the work lives in `src/services/`, and every
 failure is thrown as an `http-errors` object and rendered by the single
 `errorHandler` in `src/middlewares/errorHandler.ts`. Passwords are hashed with
@@ -112,12 +124,12 @@ Access and refresh tokens are set as `httpOnly`, `SameSite=Strict` cookies
 | ------ | --------------------------- | -------------------------- | ------------------------------------------ | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
 | POST   | `/auth/register`            | none                       | `{ firstName, lastName, email, password }` | `201 { userId }` + cookies                                               | `400` validation / email taken, `429`                                           |
 | POST   | `/auth/login`               | none                       | `{ email, password }`                      | `200 { id }` + cookies                                                   | `400` bad credentials, `403` unverified email (when gated), `423` locked, `429` |
-| POST   | `/auth/refresh`             | `refreshToken` cookie      | none                                       | `200 { id }` + new cookies                                               | `401` missing / invalid / expired / replayed                                    |
+| POST   | `/auth/refresh`             | `refreshToken` cookie      | none                                       | `200 { id }` + new cookies                                               | `401` missing / invalid / expired / replayed, `429`                             |
 | POST   | `/auth/logout`              | `refreshToken` cookie      | none                                       | `200 { success: true }`                                                  | —                                                                               |
 | GET    | `/auth/self`                | access token               | none                                       | `200 { id, firstName, lastName, email, role, emailVerified, createdAt }` | `401`                                                                           |
 | POST   | `/auth/forgot-password`     | none                       | `{ email }`                                | `202 { success: true }`                                                  | `400` validation                                                                |
 | POST   | `/auth/reset-password`      | none                       | `{ token, password }`                      | `200 { success: true }`                                                  | `400` invalid / used / expired                                                  |
-| POST   | `/auth/verify-email`        | none                       | `{ token }`                                | `200 { success: true }`                                                  | `400` invalid / used / expired                                                  |
+| POST   | `/auth/verify-email`        | none                       | `{ token }`                                | `200 { success: true }`                                                  | `400` invalid / used / expired, `429`                                           |
 | POST   | `/auth/resend-verification` | none                       | `{ email }`                                | `202 { success: true }`                                                  | `400` validation                                                                |
 | GET    | `/users`                    | access token, role `admin` | none                                       | `200 { users: [...] }`                                                   | `401`, `403`                                                                    |
 | GET    | `/health`                   | none                       | none                                       | `200 { status: "ok", uptimeSeconds }`                                    | —                                                                               |
