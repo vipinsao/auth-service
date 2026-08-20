@@ -81,6 +81,18 @@ export class UserService {
    * `failedLoginAttempts` is no longer reset to zero on locking. It has to keep
    * climbing for the backoff to have anything to count, and a successful login
    * is what clears it.
+   *
+   * That is also why the exponent has to be clamped, and `LEAST` around the
+   * whole product is not enough: `power(2, n)` is evaluated first, in double
+   * precision, and only then bounded. With the counter climbing forever the
+   * exponent climbed with it, and at 1029 failed logins - measured by bisection,
+   * 1028 works - the multiplication overflowed with `22003 value out of range`.
+   * Every later wrong password on that account then answered 500 where every
+   * other account answered 400, permanently: a durable per-account difference in
+   * the response, which is the enumeration oracle 8b17adb closed being let back
+   * in through a side door. Clamping at 20 puts the ceiling at 2^20 initial
+   * minutes, roughly two years, so `ACCOUNT_LOCK_MINUTES` is what actually bounds
+   * the wait and the clamp is never what a real account notices.
    */
   async registerFailedLogin(user: User): Promise<void> {
     await this.userRepository.query(
@@ -90,7 +102,10 @@ export class UserService {
                 WHEN "failedLoginAttempts" + 1 >= $2
                   THEN now() + (
                     LEAST(
-                      $3::numeric * power(2, "failedLoginAttempts" + 1 - $2)::numeric,
+                      $3::numeric * power(
+                        2,
+                        LEAST("failedLoginAttempts" + 1 - $2, 20)
+                      )::numeric,
                       $4::numeric
                     )::text || ' minutes'
                   )::interval
