@@ -6,7 +6,7 @@ email verification and role-based access control, backed by PostgreSQL.
 
 ## Run the tests first — the database comes with the repository
 
-86 tests, and **the repository brings its own PostgreSQL** — no Docker, no
+93 tests, and **the repository brings its own PostgreSQL** — no Docker, no
 system package, no account, nothing to install:
 
 ```bash
@@ -14,7 +14,7 @@ npm install
 npm run keys:generate
 cp .env.example .env.test          # then set DB_NAME=authservice_test
 npm run db:local                   # own terminal; wait for "ready to accept connections"
-npm run test:ci                    # 86 tests, ~35s
+npm run test:ci                    # 93 tests, ~35s
 ```
 
 `npm run db:local` starts a real platform PostgreSQL binary out of `.postgres/`
@@ -371,7 +371,7 @@ installed, as at the top of this file.
 ```bash
 cp .env.example .env.test      # DB_NAME should be a scratch database
 npm run keys:generate
-npm run test:ci                # single run, CI-safe: 86 tests
+npm run test:ci                # single run, CI-safe: 93 tests
 npm run test:watch             # watch mode for local work
 ```
 
