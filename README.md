@@ -4,7 +4,7 @@ A standalone authentication service in TypeScript: registration and login, RS256
 access tokens, rotating refresh tokens with reuse detection, password reset,
 email verification and role-based access control, backed by PostgreSQL.
 
-## Fastest way to see whether this is any good
+## Run the tests first — the database comes with the repository
 
 86 tests, and **the repository brings its own PostgreSQL** — no Docker, no
 system package, no account, nothing to install:
