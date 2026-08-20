@@ -1,3 +1,36 @@
-node_modules
-npm-debug.log
+# What must never enter the build context.
+#
+# The Dockerfile is `COPY . .`, so anything not excluded here is baked into the
+# image, and an image is not a secret: anyone who can pull it or run
+# `docker save` can read every layer.
+#
+# The previous version of this file listed `.env` alone. Docker matches that
+# literally, so `.env.dev` - DB_PASSWORD and REFRESH_TOKEN_SECRET - was copied
+# in, and so was `certs/private.pem`, the RSA key that signs every access token.
+# A container built from any developer's working tree therefore ran on that
+# developer's signing key, and anyone holding the image could mint an access
+# token for any user.
+#
+# It also defeated the CMD. `[ -f certs/private.pem ] || npm run keys:generate`
+# is meant to give each deployment its own key pair; with the key already in the
+# image the guard was satisfied and generation never ran.
+
+# Secrets and per-environment configuration.
+certs/
 .env
+.env.*
+!.env.example
+
+# Local state that is nobody else's business and bloats the context.
+logs/
+.postgres/
+node_modules
+coverage
+build
+.git
+.github
+.husky
+
+# Noise.
+npm-debug.log
+*.log
