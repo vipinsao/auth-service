@@ -2,12 +2,17 @@ import { Config } from "./config/index.js";
 import app from "./app.js";
 import logger from "./config/logger.js";
 import { AppDataSource } from "./config/data-source.js";
+import { startTelemetry, telemetryState } from "./config/telemetry.js";
 
 /** How long a shutdown may take before the process is killed anyway. */
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 const startServer = async () => {
   try {
+    // Before the first request, and therefore before the first span. Console
+    // exporters by default: no collector and no account needed.
+    const shutdownTelemetry = await startTelemetry();
+
     await AppDataSource.initialize();
     logger.info("Database connected successfully");
 
@@ -15,6 +20,7 @@ const startServer = async () => {
       logger.info("Server is listening", {
         port: Config.PORT,
         env: Config.NODE_ENV,
+        telemetry: telemetryState(),
       });
     });
 
@@ -43,6 +49,9 @@ const startServer = async () => {
         if (AppDataSource.isInitialized) {
           await AppDataSource.destroy();
         }
+        // Flush whatever the batch processor is still holding. The spans just
+        // before a deploy are disproportionately the interesting ones.
+        await shutdownTelemetry();
         logger.info("Shutdown complete");
         process.exit(0);
       } catch (err) {

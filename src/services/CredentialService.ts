@@ -1,5 +1,6 @@
 import bcrypt from "bcrypt";
 import { randomBytes } from "crypto";
+import { withSpan } from "../config/telemetry.js";
 
 /** bcrypt work factor. 10 is ~60ms on this hardware, measured. */
 const SALT_ROUNDS = 10;
@@ -19,7 +20,9 @@ const ABSENT_USER_HASH = bcrypt.hashSync(
 
 export class CredentialService {
   async hashPassword(plaintext: string): Promise<string> {
-    return bcrypt.hash(plaintext, SALT_ROUNDS);
+    return withSpan("credential.hash", { "bcrypt.cost": SALT_ROUNDS }, () =>
+      bcrypt.hash(plaintext, SALT_ROUNDS),
+    );
   }
 
   /**
@@ -36,7 +39,15 @@ export class CredentialService {
    * because it is the cost factor that determines the time.
    */
   async compareAgainstAbsentUser(plaintext: string): Promise<boolean> {
-    return bcrypt.compare(plaintext, ABSENT_USER_HASH);
+    // The SAME span name and the SAME attributes as the real comparison, on
+    // purpose. This method exists so that a login for an address with no
+    // account is indistinguishable from one for an address that has one; a span
+    // named "credential.compare_absent", or an attribute saying which branch
+    // ran, would put the answer the timing oracle used to give straight into
+    // the telemetry - and telemetry is exported off the box.
+    return withSpan("credential.compare", { "bcrypt.cost": SALT_ROUNDS }, () =>
+      bcrypt.compare(plaintext, ABSENT_USER_HASH),
+    );
   }
 
   /**
@@ -48,6 +59,8 @@ export class CredentialService {
     plaintext: string,
     hashedPassword: string,
   ): Promise<boolean> {
-    return bcrypt.compare(plaintext, hashedPassword);
+    return withSpan("credential.compare", { "bcrypt.cost": SALT_ROUNDS }, () =>
+      bcrypt.compare(plaintext, hashedPassword),
+    );
   }
 }

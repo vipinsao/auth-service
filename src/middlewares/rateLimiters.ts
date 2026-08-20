@@ -2,6 +2,7 @@ import rateLimit from "express-rate-limit";
 import type { Request, Response } from "express";
 import { Config } from "../config/index.js";
 import { createRateLimitStore } from "./rateLimitStore.js";
+import { rateLimitRejections } from "../config/telemetry.js";
 
 /**
  * Both limiters take their counter store from `RATE_LIMIT_STORE`. The default,
@@ -28,7 +29,17 @@ const rateLimitingDisabled = () => {
   );
 };
 
-const tooManyRequests = (req: Request, res: Response) => {
+/**
+ * Both limiters share this handler, so the limiter's own name is bound in
+ * rather than derived from the path - `/auth/login` and `/auth/refresh` are
+ * refused by different budgets and a chart that could not tell them apart
+ * would be answering the wrong question.
+ */
+const tooManyRequests = (limiter: string) => (req: Request, res: Response) => {
+  // A refusal is the fastest response this service produces, so it is
+  // invisible in a duration histogram - and it is the only externally visible
+  // evidence that the limiter does anything at all.
+  rateLimitRejections.add(1, { limiter });
   req.log?.warn("rate limit exceeded", { path: req.originalUrl, ip: req.ip });
   res.status(429).json({
     errors: [
@@ -54,7 +65,7 @@ export const authLimiter = rateLimit({
   standardHeaders: "draft-7",
   legacyHeaders: false,
   skip: rateLimitingDisabled,
-  handler: tooManyRequests,
+  handler: tooManyRequests("auth"),
   store: createRateLimitStore(Config.RATE_LIMIT_STORE, "auth"),
 });
 
@@ -80,6 +91,6 @@ export const refreshLimiter = rateLimit({
   standardHeaders: "draft-7",
   legacyHeaders: false,
   skip: rateLimitingDisabled,
-  handler: tooManyRequests,
+  handler: tooManyRequests("refresh"),
   store: createRateLimitStore(Config.RATE_LIMIT_STORE, "refresh"),
 });

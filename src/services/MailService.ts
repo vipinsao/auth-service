@@ -1,6 +1,7 @@
 import nodemailer, { type Transporter } from "nodemailer";
 import { Config } from "../config/index.js";
 import logger from "../config/logger.js";
+import { withSpan } from "../config/telemetry.js";
 
 export interface SentMessage {
   to: string;
@@ -80,13 +81,20 @@ const getTransporter = async (): Promise<Transporter> => {
 
 export class MailService {
   async send(to: string, subject: string, text: string): Promise<void> {
-    const mailer = await getTransporter();
-    const info = await mailer.sendMail({
-      from: Config.MAIL_FROM,
-      to,
-      subject,
-      text,
-    });
+    // Traced because both callers wrap it in a try/catch that swallows the
+    // failure - registration must not fail because the mail server is down.
+    // The span is then the only surviving evidence that a verification email
+    // was never sent, and the recipient address is deliberately NOT an
+    // attribute: telemetry leaves the box, and "who registered" is not a
+    // question the trace backend needs to be able to answer.
+    const info = await withSpan(
+      "mail.send",
+      { "mail.transport": Config.MAIL_TRANSPORT },
+      async () => {
+        const mailer = await getTransporter();
+        return mailer.sendMail({ from: Config.MAIL_FROM, to, subject, text });
+      },
+    );
 
     if (Config.MAIL_TRANSPORT === "json") {
       outbox.push({ to, subject, text });

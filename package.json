@@ -24,6 +24,7 @@
     "test:ci": "cross-env NODE_NO_WARNINGS=1 NODE_OPTIONS=--experimental-vm-modules jest --runInBand --ci",
     "keys:generate": "node scripts/generateKeys.js",
     "db:local": "node scripts/dev-db.js",
+    "bench:telemetry": "node scripts/bench-telemetry.js",
     "lint:check": "eslint .",
     "lint:fix": "eslint . --fix",
     "format:check": "prettier . --check",
@@ -69,6 +70,13 @@
     ]
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.221.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
+    "@opentelemetry/resources": "^2.10.0",
+    "@opentelemetry/sdk-metrics": "^2.10.0",
+    "@opentelemetry/sdk-trace-node": "^2.10.0",
+    "@opentelemetry/semantic-conventions": "^1.43.0",
     "bcrypt": "^6.0.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",

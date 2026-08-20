@@ -7,6 +7,7 @@ import { FindOptionsWhere, IsNull, Repository } from "typeorm";
 import { Config } from "../config/index.js";
 import { User } from "../entity/User.js";
 import { RefreshToken } from "../entity/RefreshToken.js";
+import { withSpan } from "../config/telemetry.js";
 
 const ISSUER = "auth-service";
 
@@ -74,12 +75,14 @@ export class TokenService {
 
   /** First token of a new family - one family per login/registration. */
   async startFamily(user: User): Promise<RefreshToken> {
-    return this.refreshTokenRepository.save({
-      user,
-      userId: user.id,
-      familyId: randomUUID(),
-      expiresAt: this.expiryDate(),
-    });
+    return withSpan("token.start_family", {}, () =>
+      this.refreshTokenRepository.save({
+        user,
+        userId: user.id,
+        familyId: randomUUID(),
+        expiresAt: this.expiryDate(),
+      }),
+    );
   }
 
   /**
@@ -113,30 +116,40 @@ export class TokenService {
     current: RefreshToken,
     user: User,
   ): Promise<RefreshToken | null> {
-    return this.refreshTokenRepository.manager.transaction(async (manager) => {
-      const row = await manager.findOne(RefreshToken, {
-        where: { id: current.id },
-        lock: { mode: "pessimistic_write" },
-      });
+    // Traced because of the pessimistic row lock. A refresh that is slow
+    // because it waited on a concurrent rotation and one that is slow because
+    // the database is slow look identical in a request duration; here they do
+    // not, and `token.rotate.contended` says which happened.
+    return withSpan("token.rotate", {}, (span) =>
+      this.refreshTokenRepository.manager.transaction(async (manager) => {
+        const row = await manager.findOne(RefreshToken, {
+          where: { id: current.id },
+          lock: { mode: "pessimistic_write" },
+        });
 
-      // Re-read under the lock: by the time the lock is granted, a concurrent
-      // refresh may already have spent this row and committed.
-      if (!row || row.revokedAt !== null) return null;
+        // Re-read under the lock: by the time the lock is granted, a concurrent
+        // refresh may already have spent this row and committed.
+        if (!row || row.revokedAt !== null) {
+          span.setAttribute("token.rotate.contended", true);
+          return null;
+        }
 
-      const replacement = await manager.save(RefreshToken, {
-        user,
-        userId: user.id,
-        familyId: current.familyId,
-        expiresAt: this.expiryDate(),
-      });
+        const replacement = await manager.save(RefreshToken, {
+          user,
+          userId: user.id,
+          familyId: current.familyId,
+          expiresAt: this.expiryDate(),
+        });
 
-      await manager.update(RefreshToken, current.id, {
-        revokedAt: new Date(),
-        replacedByTokenId: replacement.id,
-      });
+        await manager.update(RefreshToken, current.id, {
+          revokedAt: new Date(),
+          replacedByTokenId: replacement.id,
+        });
 
-      return replacement;
-    });
+        span.setAttribute("token.rotate.contended", false);
+        return replacement;
+      }),
+    );
   }
 
   /**
@@ -174,24 +187,26 @@ export class TokenService {
     column: "familyId" | "userId",
     value: string | number,
   ): Promise<void> {
-    await this.refreshTokenRepository.manager.transaction(async (manager) => {
-      // `column` is one of two literals chosen here, never by a caller, so
-      // interpolating it cannot carry anything in from outside. The value that
-      // can is a bound parameter.
-      await manager.query(
-        `SELECT "id" FROM "refresh_token" WHERE "${column}" = $1 ORDER BY "id" FOR UPDATE`,
-        [value],
-      );
+    await withSpan("token.revoke", { "token.revoke.by": column }, () =>
+      this.refreshTokenRepository.manager.transaction(async (manager) => {
+        // `column` is one of two literals chosen here, never by a caller, so
+        // interpolating it cannot carry anything in from outside. The value that
+        // can is a bound parameter.
+        await manager.query(
+          `SELECT "id" FROM "refresh_token" WHERE "${column}" = $1 ORDER BY "id" FOR UPDATE`,
+          [value],
+        );
 
-      await manager.update(
-        RefreshToken,
-        {
-          [column]: value,
-          revokedAt: IsNull(),
-        } as FindOptionsWhere<RefreshToken>,
-        { revokedAt: new Date() },
-      );
-    });
+        await manager.update(
+          RefreshToken,
+          {
+            [column]: value,
+            revokedAt: IsNull(),
+          } as FindOptionsWhere<RefreshToken>,
+          { revokedAt: new Date() },
+        );
+      }),
+    );
   }
 
   async revokeFamily(familyId: string): Promise<void> {

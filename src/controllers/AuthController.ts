@@ -18,6 +18,7 @@ import type {
   ResetPasswordRequest,
   TokenRequest,
 } from "../types/index.js";
+import { tokenReuseDetections } from "../config/telemetry.js";
 
 /** Deliberately identical for "no such user" and "wrong password". */
 const CREDENTIALS_REJECTED = "Email or password does not match";
@@ -166,6 +167,9 @@ export class AuthController {
       }
 
       if (stored.revokedAt !== null) {
+        // The one number here worth alerting on: it is either always zero, or
+        // somebody is replaying refresh tokens.
+        tokenReuseDetections.add(1, { cause: "replay" });
         await this.tokenService.revokeFamily(stored.familyId);
         req.log.warn("refresh token reuse detected - family revoked", {
           userId: stored.userId,
@@ -197,6 +201,11 @@ export class AuthController {
       // leaves the attacker logged in. DECISIONS.md decision 5 already owns the
       // cost, which is that a client racing its own refresh is logged out.
       if (!replacement) {
+        // Counted apart from a replay. The service cannot tell them apart and
+        // answers both the same way, but an operator can act on the difference:
+        // a rising "concurrent" count is a client racing its own refresh, and
+        // a rising "replay" count is an attack.
+        tokenReuseDetections.add(1, { cause: "concurrent" });
         await this.tokenService.revokeFamily(stored.familyId);
         req.log.warn("concurrent refresh of one token - family revoked", {
           userId: stored.userId,
