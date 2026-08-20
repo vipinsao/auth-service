@@ -589,11 +589,16 @@ Consequences, in order of severity:
    counter climbing, because `login` runs `registerFailedLogin` before it ever
    looks at `lockedUntil` (`AuthController.ts:91-99`).
 
-The fix is to cap the exponent rather than the result — e.g. compute
-`LEAST("failedLoginAttempts" + 1 - $2, 20)` inside `power`, or use
-`least(..., $4)` on an exponent bounded by `ceil(log2($4/$3))`. Not applied here:
-this document records the finding; the change belongs in a commit of its own with
-a regression test alongside `tests/users/login.spec.ts`.
+**Fixed in `57a3dc9`**, after this document surfaced it. The exponent is now
+capped rather than the result — `power(2, LEAST("failedLoginAttempts" + 1 - $2, 20))`
+in `src/services/UserService.ts:107`. 2^20 initial minutes is about two years, so
+`ACCOUNT_LOCK_MINUTES` remains the thing that bounds the wait. Covered by
+`tests/db/account-lockout.spec.ts`, which drives the real statement at the
+boundary pair 1028/1029 with the counter pre-set, plus a case asserting the
+ordinary doubling below the cap so the clamp cannot quietly flatten it.
+
+Worth recording how it was found: writing this section required explaining what
+`LEAST` actually bounds, and the explanation did not survive being written down.
 
 **A second, lower-severity mismatch:** the `accessToken` cookie's `maxAge` is
 hard-coded to one hour (`src/utils/cookies.ts:27,36`) while the token's own
