@@ -372,6 +372,23 @@ an attacker land in a chosen victim's bucket deliberately — the hash is there
 for a fixed width and collision resistance, not secrecy, since the input is a
 public IP address.
 
+**The precondition, which the first version of this decision left implicit and
+the config comment then got wrong.** A hop count says nothing about the network:
+Express simply counts back from the right-hand end of `X-Forwarded-For`. So
+`TRUST_PROXY=1` is only safe where this service's port cannot be reached except
+through a proxy that overwrites the header. Setting it on a directly reachable
+port — the Compose stack in this repository publishes 5501 with nothing in front
+of it — restores the original bug in full. Measured, 60 logins each with a
+unique forged header: unset gives `{400: 20, 429: 40}`, `TRUST_PROXY` set gives
+`{400: 60}` and 62 rows in `rate_limit_hit`, each holding a window.
+
+`TRUST_PROXY=true` is refused outright and warned about rather than honoured. It
+is the worst possible value — trusting every hop means the leftmost entry, which
+is entirely the caller's — and it is the one a reader reaches for when the
+variable looks like a boolean. express-rate-limit's own validator does not flag
+it when it arrives this way. The sibling `Smart-Ingredient-Analyzer` refuses it
+for the same reason.
+
 **Cost.** A deployment genuinely behind a load balancer must now set
 `TRUST_PROXY=1`, and if it forgets, every client behind that balancer shares one
 bucket and gets throttled together. That failure is loud and hits the operator

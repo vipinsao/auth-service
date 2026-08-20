@@ -26,7 +26,9 @@ const app = express();
 //
 // It now defaults to false and is opt-in via TRUST_PROXY, because a service
 // that under-counts a proxy's clients is a worse deployment, while a service
-// that trusts a forged header is a broken rate limiter.
+// that trusts a forged header is a broken rate limiter. Setting it is only safe
+// where the port is unreachable except through the proxy - see the precondition
+// written out over `trustProxy` in config/index.ts.
 app.set("trust proxy", Config.TRUST_PROXY);
 
 // First, so that even a 404 or a rejected request carries a request id.

@@ -125,10 +125,24 @@ assertUsableSecret(process.env.REFRESH_TOKEN_SECRET as string, IS_LOCAL);
  * `req.ip` is what the rate limiters key on. Trusting it when nothing strips
  * the header lets any caller choose their own rate-limit bucket - and, since
  * Express does not validate the value, choose a bucket that is not an IP
- * address at all.
+ * address at all. Measured, 60 logins each with a unique forged header: unset,
+ * 20 got through and 40 were throttled; with `TRUST_PROXY` set, all 60 got
+ * through and the limiter never fired once. The 60 forged values also created
+ * 62 rows in `rate_limit_hit`, each holding a full window - unbounded growth
+ * from unauthenticated traffic.
  *
- * So it defaults to `false`: only the real socket address is believed. Set
- * `TRUST_PROXY` to the number of proxies in front of this service (`1` for a
+ * So it defaults to `false`: only the real socket address is believed.
+ *
+ * THE PRECONDITION FOR SETTING IT AT ALL is that this service's port cannot be
+ * reached except through the proxy, and that the proxy overwrites
+ * `X-Forwarded-For` rather than appending to it. A hop count is not a
+ * statement about the network - Express just counts back from the right-hand
+ * end of the header - so if anything can still open a socket to the port
+ * directly, `TRUST_PROXY=1` hands that caller `req.ip` of their choosing and
+ * the limiter is decorative again. The Compose stack in this repository
+ * publishes 5501 with no proxy in front of it, so there it must stay unset.
+ *
+ * When the precondition does hold, set it to the number of proxies (`1` for a
  * single load balancer), or to an Express-recognised value such as `loopback`
  * or a subnet list. See DECISIONS.md decision 14.
  */
@@ -136,9 +150,32 @@ const trustProxy = (value: string | undefined): boolean | number | string => {
   if (value === undefined || value.trim() === "") return false;
   const trimmed = value.trim();
   if (trimmed === "false") return false;
-  if (trimmed === "true") return true;
   const hops = Number(trimmed);
   if (Number.isInteger(hops) && hops >= 0) return hops;
+  // "true" trusts every hop, so any client can name its own address. Refused.
+  //
+  // It is the one value that must not be accepted quietly: it is the worst
+  // possible setting, it is what a reader reaches for when the variable looks
+  // like a boolean, and express-rate-limit's own validator does not flag it
+  // when it arrives through `app.set` this way. Falling back to `false` keeps
+  // the limiter working; the warning is what tells the operator their intent
+  // was refused rather than applied.
+  if (trimmed === "true") {
+    // Not `logger`: this module is what configures the logger, so importing it
+    // here would be a cycle. One line on stderr, in the same JSON shape the
+    // logger emits.
+    // eslint-disable-next-line no-console
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message:
+          "TRUST_PROXY=true trusts every hop, so any caller can choose their " +
+          "own rate-limit bucket; falling back to false",
+        hint: "Use the number of proxies in front of this process, e.g. TRUST_PROXY=1",
+      }),
+    );
+    return false;
+  }
   // Express also accepts "loopback", "linklocal", "uniquelocal" and CIDR lists.
   return trimmed;
 };
