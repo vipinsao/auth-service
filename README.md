@@ -213,6 +213,37 @@ one. `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSWORD`, `DB_NAME` and
 `REFRESH_TOKEN_SECRET` are mandatory: the process refuses to start without them.
 Every variable is listed and commented in [.env.example](./.env.example).
 
+### Rate limiting across replicas
+
+`express-rate-limit`'s default store keeps its counters in the process. With two
+replicas an attacker gets twice the budget, so a limit of 20 is really 40 — and
+a rolling deploy means even a single-instance service is periodically two.
+
+`RATE_LIMIT_STORE` selects the store:
+
+- `memory` (default) — the in-process store. Correct for one instance, needs
+  nothing.
+- `postgres` — counters in the `rate_limit_hit` table, shared by every replica
+  connected to the same database. No extra infrastructure: it reuses the
+  database the service already requires.
+
+The Postgres store does its whole increment in one `INSERT ... ON CONFLICT DO
+UPDATE ... RETURNING`, so replicas incrementing the same key serialise on the
+row lock rather than racing a read-then-write. Expired rows are swept at most
+once per window by whichever request notices, so there is no scheduler to run.
+
+Writing a different store — Redis, Memcached, anything — means implementing
+`express-rate-limit`'s `Store` interface (`increment`, `decrement`, `resetKey`,
+optionally `get`, `resetAll` and `init`) and returning it from
+`createRateLimitStore` in `src/middlewares/rateLimitStore.ts`. One thing to know
+before you do: express-rate-limit does **not** prepend `store.prefix` to the
+keys it passes in — it only reads that field for its own double-count check — so
+the store must apply the prefix itself, or every limiter shares one budget.
+
+`tests/db/rate-limit-store.spec.ts` proves the sharing works by running two
+independent Express apps with two independent store objects and asserting that
+spending the budget on the first makes the second refuse.
+
 ### Email
 
 `MAIL_TRANSPORT` selects how password-reset and verification mail is delivered.
@@ -266,7 +297,7 @@ src/
   controllers/         AuthController, UserController
   services/            UserService, TokenService, CredentialService,
                        VerificationTokenService, MailService
-  entity/              User, RefreshToken, VerificationToken
+  entity/              User, RefreshToken, VerificationToken, RateLimitHit
   migrations/          generated schema migrations + the explicit register
   middlewares/         requestContext, errorHandler, validateRequest,
                        authenticate, requireRole, rateLimiters
@@ -276,7 +307,8 @@ src/
 tests/
   users/               register, login, refresh, rbac, password-reset, rate-limit
   ops/                 health, readiness, headers, docs, 404
-  db/                  migrations up, down, and parity with the entities
+  db/                  migrations up, down, parity with the entities;
+                       the shared rate-limit store across two replicas
   unit/                UserService with fake repositories
 ```
 
@@ -299,9 +331,12 @@ Things a reader should know before judging this code:
   TypeScript sources under nodemon with the dev dependencies installed. There is
   no production Dockerfile; a deployment would run `npm run migration:run:built`
   and `npm start` against the compiled output.
-- **Rate limiting is in-process.** `express-rate-limit` uses its default memory
-  store, so the limit is per instance. More than one replica needs a shared
-  store (Redis) for the limit to mean anything.
+- **Rate limiting defaults to in-process, and must not stay that way on more
+  than one replica.** The default memory store counts per instance, so N
+  replicas mean N times the budget — and a rolling deploy makes even a
+  single-instance service briefly two. Set `RATE_LIMIT_STORE=postgres` to move
+  the counters into the database every replica already shares. See
+  "Rate limiting across replicas" above.
 - **Email verification does not block login by default.** Set
   `REQUIRE_EMAIL_VERIFICATION=true` to enforce it; both behaviours are tested.
 - **The SMTP mail transport has never been run.** `json` and `ethereal` were

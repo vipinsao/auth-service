@@ -13,7 +13,9 @@
  */
 import type { MixedList, MigrationInterface } from "typeorm";
 import { InitialSchema1787212846340 } from "./1787212846340-InitialSchema.js";
+import { RateLimitHit1787213977541 } from "./1787213977541-RateLimitHit.js";
 
 export const migrations: MixedList<new () => MigrationInterface> = [
   InitialSchema1787212846340,
+  RateLimitHit1787213977541,
 ];

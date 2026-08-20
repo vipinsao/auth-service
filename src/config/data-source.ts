@@ -4,6 +4,7 @@ import { User } from "../entity/User.js";
 import { Config } from "./index.js";
 import { RefreshToken } from "../entity/RefreshToken.js";
 import { VerificationToken } from "../entity/VerificationToken.js";
+import { RateLimitHit } from "../entity/RateLimitHit.js";
 import { migrations } from "../migrations/index.js";
 
 export const AppDataSource = new DataSource({
@@ -22,7 +23,7 @@ export const AppDataSource = new DataSource({
   // up locally instead of at deploy time. See DECISIONS.md decision 8.
   synchronize: Config.IS_TEST,
   logging: false,
-  entities: [User, RefreshToken, VerificationToken],
+  entities: [User, RefreshToken, VerificationToken, RateLimitHit],
   migrations,
   // Applying a migration outside a transaction leaves a failure half-applied.
   migrationsTransactionMode: "each",

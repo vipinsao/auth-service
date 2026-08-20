@@ -85,6 +85,9 @@ export const Config = {
   ),
   AUTH_RATE_LIMIT_MAX: num(process.env.AUTH_RATE_LIMIT_MAX, 20),
   REFRESH_RATE_LIMIT_MAX: num(process.env.REFRESH_RATE_LIMIT_MAX, 120),
+  RATE_LIMIT_STORE: (process.env.RATE_LIMIT_STORE ?? "memory") as
+    | "memory"
+    | "postgres",
   MAX_FAILED_LOGIN_ATTEMPTS: num(process.env.MAX_FAILED_LOGIN_ATTEMPTS, 5),
   ACCOUNT_LOCK_MINUTES: num(process.env.ACCOUNT_LOCK_MINUTES, 15),
 

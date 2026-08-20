@@ -252,3 +252,57 @@ lockfile diff is large but it is not unverified.
 fixed version for both TypeORM CVEs, and `0.3.31` is still the `legacy` dist-tag
 rather than an abandoned line. Taking a major version of the ORM with no
 security driver would be risk without a reason, so this stays on 0.3.x.
+
+---
+
+## 13. The rate-limit store is pluggable, and there is a free shared one
+
+**Decision.** `RATE_LIMIT_STORE` selects the counter store: `memory` (the
+default, `express-rate-limit`'s own in-process store) or `postgres`
+(`PostgresRateLimitStore`, counters in the database every replica already
+shares).
+
+**Why.** An in-process counter is per instance, so N replicas give an attacker N
+times the budget and a limit of 20 is really a limit of 20N. That is not a
+theoretical objection: a rolling deploy runs two instances at once, so even a
+"single instance" service is periodically two.
+
+The usual fix is Redis, which means another service to run, monitor and pay for.
+This service already has a database that every replica connects to, and a rate
+limit counter is a row. The shared store therefore costs one table and one
+statement per request instead of a new piece of infrastructure.
+
+**How it stays correct with several replicas.** The whole increment is one
+statement:
+
+```sql
+INSERT INTO rate_limit_hit ("key", hits, "expiresAt") VALUES ($1, 1, now() + ...)
+ON CONFLICT ("key") DO UPDATE SET
+  hits = CASE WHEN rate_limit_hit."expiresAt" <= now() THEN 1 ELSE rate_limit_hit.hits + 1 END,
+  ...
+RETURNING hits, "expiresAt"
+```
+
+Read, decide and write happen inside one statement, under the row lock
+`ON CONFLICT` takes, so two replicas incrementing the same key serialise. A
+read-then-write would let both see 19 and both write 20.
+
+**The trap that cost a bug here.** `express-rate-limit` does _not_ prepend
+`store.prefix` to the keys it passes in — it only reads that field for its own
+double-count check. Applying it is the store's job. Until it did, `authLimiter`
+and `refreshLimiter` wrote to the same row and silently shared one budget, which
+a live two-replica run showed as a single `rate_limit_hit` row keyed
+`127.0.0.1`. `tests/db/rate-limit-store.spec.ts` now asserts the stored keys are
+`auth:1.2.3.4` and `refresh:1.2.3.4`, and fails if the scoping is removed.
+
+**Why memory is still the default.** It needs nothing and it is correct for one
+instance, which is what someone cloning this repo has. Making `postgres` the
+default would put a database write on the path of every auth request for a setup
+that does not need one. The README says plainly that more than one replica means
+changing it.
+
+**Cost.** One extra round trip per rate-limited request, and rate limiting now
+depends on the database being up. Expired rows are swept at most once per window
+by whichever request notices, so there is no scheduler; a failed sweep is logged
+and ignored, because leaving stale rows behind is housekeeping and failing the
+user's request would be an outage.

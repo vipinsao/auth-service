@@ -1,6 +1,15 @@
 import rateLimit from "express-rate-limit";
 import type { Request, Response } from "express";
 import { Config } from "../config/index.js";
+import { createRateLimitStore } from "./rateLimitStore.js";
+
+/**
+ * Both limiters take their counter store from `RATE_LIMIT_STORE`. The default,
+ * `memory`, is express-rate-limit's own in-process store: right for a single
+ * instance, and worth nothing across replicas, where N instances mean N times
+ * the budget. `postgres` puts the counters in the database every replica
+ * already shares. See `rateLimitStore.ts` and DECISIONS.md decision 13.
+ */
 
 /**
  * Rate limiting is skipped under `NODE_ENV=test` so the integration suite is not
@@ -38,6 +47,7 @@ export const authLimiter = rateLimit({
   legacyHeaders: false,
   skip: rateLimitingDisabled,
   handler: tooManyRequests,
+  store: createRateLimitStore(Config.RATE_LIMIT_STORE, "auth"),
 });
 
 /**
@@ -63,4 +73,5 @@ export const refreshLimiter = rateLimit({
   legacyHeaders: false,
   skip: rateLimitingDisabled,
   handler: tooManyRequests,
+  store: createRateLimitStore(Config.RATE_LIMIT_STORE, "refresh"),
 });
