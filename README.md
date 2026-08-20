@@ -388,6 +388,71 @@ npm run build
 npm run test:ci
 ```
 
+## Observability
+
+Traces and metrics via [OpenTelemetry](https://opentelemetry.io/) (Apache-2.0),
+**exporting to the console by default** — no collector, no account, nothing to
+pay for.
+
+```bash
+npm run dev                                            # traces + metrics on stdout
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 npm run dev   # to a collector
+OTEL_TRACES_EXPORTER=none OTEL_METRICS_EXPORTER=none npm run dev  # off
+```
+
+Every variable is OpenTelemetry's own and is listed in
+[.env.example](./.env.example). Under `NODE_ENV=test` everything defaults to
+`none`, so the suite does not print a span apiece.
+
+The structured log already says how long a request took. Tracing is only here
+where it says how long doing **what**, which on this service is three places:
+
+| span                                                   | why it exists                                                                                                                                                                                                                                                         |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `credential.hash` / `credential.compare`               | bcrypt at cost 10, ~60ms, deliberately. The largest single cost of a login by an order of magnitude, and the number to look at before anyone proposes lowering the cost factor.                                                                                       |
+| `token.start_family` / `token.rotate` / `token.revoke` | the refresh path writes two rows inside a transaction that takes a pessimistic row lock. `token.rotate.contended` distinguishes "slow because it waited on a concurrent rotation" from "slow because the database is slow" — indistinguishable in a request duration. |
+| `mail.send`                                            | an outbound call on the registration and reset paths, wrapped in a `try/catch` that deliberately swallows failures. The span is the only surviving evidence that a verification email never went.                                                                     |
+
+Nothing else is traced. A span around one indexed `SELECT` would add noise to
+every trace and tell nobody anything.
+
+Two deliberate omissions, both security rather than taste. `credential.compare`
+is the span name for **both** the real comparison and
+`compareAgainstAbsentUser`, with identical attributes: that method exists so a
+login for an address with no account is indistinguishable from one for an
+address that has one, and a span naming the branch would put the answer the
+timing oracle used to give straight into telemetry, which leaves the box.
+`mail.send` carries the transport and **not** the recipient, for the same
+reason.
+
+Three metrics: `http.server.request.duration` by route and outcome,
+`auth.rate_limit.rejections` by which budget refused, and
+`auth.token.reuse_detected` split into `replay` and `concurrent` — the service
+answers both the same way and cannot tell them apart, but an operator can act
+on the difference. The `http.route` attribute is a closed set derived from the
+matched route, never from the caller's URL.
+
+Every log line carries `traceId` and `spanId`, and `x-trace-id` comes back on
+the response beside the `x-request-id` that was already there.
+
+**What it costs**, from `npm run bench:telemetry`, 2000 `GET /health` per
+configuration (that route because it does no bcrypt and touches no database, so
+the overhead is resolvable rather than lost inside a 60ms hash):
+
+| configuration               | p50     | p95     | mean    |
+| --------------------------- | ------- | ------- | ------- |
+| off                         | 0.684ms | 1.241ms | 0.772ms |
+| console (default)           | 0.783ms | 1.533ms | 0.958ms |
+| console, 1s metric interval | 0.831ms | 1.357ms | 0.945ms |
+
+**+0.099ms at p50** on the cheapest route this service serves — and roughly
+0.16% of a login, which spends ~60ms in bcrypt by design.
+
+Instrumentation is hand-written rather than
+`@opentelemetry/auto-instrumentations-node`; the reasoning is in
+[DECISIONS.md](./DECISIONS.md) decision 18 and at the top of
+`src/config/telemetry.ts`.
+
 ## Project layout
 
 ```
@@ -421,7 +486,8 @@ Data: PostgreSQL via TypeORM 0.3 and `pg`.
 Auth: `jsonwebtoken` (RS256 access, HS256 refresh), `bcrypt`.
 Hardening: `helmet`, `cors`, `express-rate-limit`, `express-validator`,
 `cookie-parser`, `http-errors`.
-Operations: `winston`, `nodemailer`, `swagger-ui-express`, `dotenv`.
+Operations: `winston`, `nodemailer`, `swagger-ui-express`, `dotenv`,
+OpenTelemetry (API, Node tracer, metrics SDK, OTLP HTTP exporters).
 Tooling: Jest 30 with ts-jest, supertest, ESLint 9 (flat config), Prettier,
 husky and lint-staged.
 
@@ -456,6 +522,15 @@ run migration:run && npm run dev"`) was run against an empty database and
   brought the service up serving requests. What has not been exercised is the
   orchestration: image build, service healthcheck ordering, container
   networking.
+- **Telemetry is on by default and writes to stdout.** That is the right default
+  for a repository somebody is evaluating and the wrong one for a container with
+  a log budget. Point it at a collector with `OTEL_EXPORTER_OTLP_ENDPOINT` or
+  turn it off with `OTEL_TRACES_EXPORTER=none`.
+- **Nothing consumes the telemetry.** It has been verified by reading the
+  console exporter's output — one trace per request, the right spans under the
+  right parents, the reuse counter recording `cause=replay` — but no collector,
+  dashboard or alert has been built on it, and `auth.token.reuse_detected` is
+  the one metric here that deserves an alert.
 - **No refresh-token cleanup job.** Revoked and expired rows accumulate in
   `refresh_token`; a periodic delete is needed before this runs for long.
 - **Logout revokes the whole family, not every session.** There is no

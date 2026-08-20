@@ -488,3 +488,93 @@ without a default is caught the next time the suite runs.
 
 **Cost.** One indirection on every optional read, and a config test that fails
 if `.env.example` and the defaults drift apart — which is the point.
+
+## 18. Three spans, three metrics, and two of them shaped by the timing oracle
+
+**Decision.** OpenTelemetry, hand-written rather than auto-instrumented,
+exporting to the console by default. Spans around bcrypt, the refresh
+transaction and the outbound mail send, and nowhere else. Three metrics.
+
+**Why so little.** `requestContext` already writes one structured line per
+request with method, path, status and duration. That answers "how long". Adding
+tracing is only worth its weight where it answers "how long doing what", and on
+an auth service there are three such places. bcrypt at cost 10 is ~60ms by
+design and dominates a login by an order of magnitude — it is the number anyone
+should look at before proposing a lower cost factor, and it should be visible
+rather than inferred. `rotate` and `revokeLive` run transactions that take a
+pessimistic row lock (decisions 5 and 6), so a slow refresh can mean "the
+database is slow" or "this caller waited on a concurrent rotation", and those
+have opposite remedies; `token.rotate.contended` separates them. `MailService.send`
+is an outbound network call that both of its callers wrap in a `try/catch` which
+deliberately swallows the failure, because registration must not fail when the
+mail server is down — the span is then the only surviving evidence that a
+verification email was never sent.
+
+A span around one indexed `SELECT` was considered and rejected. It would appear
+in every trace, and it would never be the answer.
+
+**Why not `@opentelemetry/auto-instrumentations-node`.** The build is ESM
+(`"type": "module"`, `module: esnext`), and auto-instrumentation works by
+patching CommonJS `require`. Under ESM it needs
+`--experimental-loader @opentelemetry/instrumentation/hook.mjs` threaded through
+`npm start`, `nodemon.json`, the Dockerfile and Jest — four places to forget,
+and the failure mode of forgetting is silence. What it would have bought is
+spans around `pg` and `http`, neither of which answers any of the three
+questions above. The cost of choosing manual is stated rather than hidden: a
+`fetch` added elsewhere later will be invisible until somebody wraps it.
+
+**Two decisions the timing oracle made for us.** `CredentialService.compareAgainstAbsentUser`
+gets the _same_ span name and the _same_ attributes as the real comparison. That
+method exists (decision 6) so a login for an address with no account spends the
+same time as one for an address that has one; naming its span differently — or
+adding a `user_found` attribute anywhere on the login path — would put the answer
+the oracle used to give straight into the telemetry, and telemetry is exported
+off the box. For the same reason `mail.send` carries the transport and not the
+recipient: "who registered" is not a question a trace backend needs to be able to
+answer.
+
+**Three metrics.** `http.server.request.duration` by route and outcome;
+`auth.rate_limit.rejections` by limiter, because a refusal is the fastest
+response this service produces and is therefore invisible in a duration
+histogram; and `auth.token.reuse_detected`, split into `replay` and
+`concurrent`. The service cannot tell those apart and answers both by burning
+the family (decision 5) — but an operator can act on the difference: a rising
+`concurrent` count is a client racing its own refresh, and a rising `replay`
+count is an attack. It is the one number here that deserves an alert.
+
+**The route attribute is a closed set, and getting there took two attempts.**
+A metric attribute taken from an unauthenticated caller is a memory leak: one
+scan of this service would mint a time series per probed URL, and they are never
+reclaimed. So the attribute comes from `req.route.path`, which the router
+declares. The first version composed it as `${req.baseUrl}${req.route.path}` —
+correct while the handler runs, and wrong by the time `res.on("finish")` fires,
+because Express has restored `req.baseUrl` to `""` and the error path writes its
+response from the app-level handler after that restore. A successful login was
+labelled `/auth/login` and a failed one `/login`: the same endpoint under two
+names, splitting exactly when a chart most needs them together. The prefix is
+now recovered from `req.originalUrl` and only used when it ends with a path this
+service declared, with case and trailing slashes normalised.
+
+**A defect worth recording, because it was written during this change.**
+Instruments resolve on first use, not at import. `trace.getTracer()` returns a
+proxy that picks up a provider registered later, which is why a module-scope
+tracer works; `metrics.getMeter()` does not — called before
+`setGlobalMeterProvider` it returns a `NoopMeter`, and every instrument built
+from it is permanently and silently a no-op. Traces appeared, metrics did not,
+and nothing reported an error. It was caught by running the service and grepping
+the exporter's output for the metric names, not by reading the code.
+
+**Cost.** `npm run bench:telemetry`, 2000 `GET /health` per configuration — that
+route because it does no bcrypt and touches no database, so the overhead is
+resolvable rather than lost inside a 60ms hash:
+
+| configuration               | p50     | p95     | mean    |
+| --------------------------- | ------- | ------- | ------- |
+| off                         | 0.684ms | 1.241ms | 0.772ms |
+| console (default)           | 0.783ms | 1.533ms | 0.958ms |
+| console, 1s metric interval | 0.831ms | 1.357ms | 0.945ms |
+
++0.099ms at p50 on the cheapest route here, and roughly 0.16% of a login. The
+span processor is `Batch` rather than `Simple` for that reason: a
+`SimpleSpanProcessor` serialises and writes on the request thread as each span
+ends, putting the exporter inside the path it exists to observe.
