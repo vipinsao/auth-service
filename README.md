@@ -181,8 +181,8 @@ All three options are free:
 - `smtp` — any SMTP server, via `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`,
   `SMTP_USER`, `SMTP_PASSWORD`.
 
-Only the `json` transport has been exercised end to end here; see
-"Notes and limitations".
+The `json` and `ethereal` transports have both been run end to end from this
+repository; `smtp` has not. See "Notes and limitations".
 
 ## Running the tests
 
@@ -257,9 +257,10 @@ Things a reader should know before judging this code:
   store (Redis) for the limit to mean anything.
 - **Email verification does not block login by default.** Set
   `REQUIRE_EMAIL_VERIFICATION=true` to enforce it; both behaviours are tested.
-- **Only the `json` mail transport has been run.** The Ethereal and SMTP
-  branches are implemented and typechecked but have not been exercised against a
-  live server from this machine.
+- **The SMTP mail transport has never been run.** `json` and `ethereal` were
+  both exercised end to end (Ethereal returned a working preview URL); the
+  `smtp` branch is implemented and typechecked but untested against a real
+  server.
 - **Docker Compose and the CI workflow are unverified here.** Docker is not
   available in the environment this was built in. Every command the workflow
   runs (`npm ci`, `keys:generate`, `lint:check`, `typecheck`, `build`,
