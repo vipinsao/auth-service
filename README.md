@@ -145,8 +145,11 @@ docker compose up --build
 # Docs  http://localhost:5501/api-docs
 ```
 
-Compose starts PostgreSQL, waits for its healthcheck, generates the key pair on
-first boot and runs the service with nodemon against a bind mount.
+Compose starts PostgreSQL and waits for its healthcheck. The image's `CMD` then
+generates the key pair on first boot, runs `npm run migration:run` to create the
+schema, and only then starts the service with nodemon against a bind mount. A
+failed migration stops the container rather than starting the service against a
+half-built schema.
 
 ### Without Docker
 
@@ -154,10 +157,40 @@ first boot and runs the service with nodemon against a bind mount.
 npm install
 npm run keys:generate          # writes certs/private.pem and certs/public.pem (gitignored)
 cp .env.example .env.dev       # then fill in the values
+createdb authservice_dev       # or any empty database matching DB_NAME
+npm run migration:run          # creates the schema
 npm run dev                    # http://localhost:5501
 ```
 
-Create the database first, e.g. `createdb authservice`.
+The database has to exist and be migrated before the service starts:
+`synchronize` is on only under `NODE_ENV=test`, so nothing builds the schema
+implicitly.
+
+### Database migrations
+
+The schema lives in `src/migrations/`, registered in `src/migrations/index.ts`.
+
+| Script                                                | What it does                                                                |
+| ----------------------------------------------------- | --------------------------------------------------------------------------- |
+| `npm run migration:run`                               | Applies every pending migration. Idempotent — a second run is a no-op.      |
+| `npm run migration:revert`                            | Reverts the last applied migration.                                         |
+| `npm run migration:show`                              | Lists migrations and whether each is applied.                               |
+| `npm run migration:generate -- src/migrations/<Name>` | Diffs the entities against the current database and writes a new migration. |
+| `npm run migration:run:built`                         | The same as `migration:run`, against compiled `build/` output.              |
+| `npm run migration:revert:built`                      | The same as `migration:revert`, against compiled `build/` output.           |
+
+The first four run the TypeScript sources through `ts-node`'s ESM loader —
+`tsx` cannot be used here because it does not emit the decorator metadata
+TypeORM reads the column types from. The `:built` pair run plain `node` against
+`build/`, which is the path a deployment takes: it needs no dev dependencies.
+
+After generating a migration, add its class to the array in
+`src/migrations/index.ts`. `tests/db/migrations.spec.ts` fails if you forget.
+
+Adding a column to an entity without writing a migration is caught by the same
+suite: it runs the migrations on an empty database and asserts TypeORM's schema
+builder has no remaining DDL to apply, so the migrations and the entities cannot
+drift apart silently.
 
 ### Configuration
 
@@ -222,6 +255,7 @@ src/
   services/            UserService, TokenService, CredentialService,
                        VerificationTokenService, MailService
   entity/              User, RefreshToken, VerificationToken
+  migrations/          generated schema migrations + the explicit register
   middlewares/         requestContext, errorHandler, validateRequest,
                        authenticate, requireRole, rateLimiters
   validators/          express-validator schemas per route
@@ -230,6 +264,7 @@ src/
 tests/
   users/               register, login, refresh, rbac, password-reset, rate-limit
   ops/                 health, readiness, headers, docs, 404
+  db/                  migrations up, down, and parity with the entities
   unit/                UserService with fake repositories
 ```
 
@@ -248,10 +283,10 @@ husky and lint-staged.
 
 Things a reader should know before judging this code:
 
-- **No database migrations.** TypeORM `synchronize` builds the schema from the
-  entity classes. It is disabled when `NODE_ENV=prod`, which means a production
-  deployment currently has no way to create its schema. Migrations are the next
-  piece of work — see DECISIONS.md.
+- **The Docker image is a development image.** `docker/dev/Dockerfile` runs the
+  TypeScript sources under nodemon with the dev dependencies installed. There is
+  no production Dockerfile; a deployment would run `npm run migration:run:built`
+  and `npm start` against the compiled output.
 - **Rate limiting is in-process.** `express-rate-limit` uses its default memory
   store, so the limit is per instance. More than one replica needs a shared
   store (Redis) for the limit to mean anything.
@@ -261,11 +296,17 @@ Things a reader should know before judging this code:
   both exercised end to end (Ethereal returned a working preview URL); the
   `smtp` branch is implemented and typechecked but untested against a real
   server.
-- **Docker Compose and the CI workflow are unverified here.** Docker is not
-  available in the environment this was built in. Every command the workflow
-  runs (`npm ci`, `keys:generate`, `lint:check`, `typecheck`, `build`,
-  `test:ci`) was run locally against a real PostgreSQL 18 instance and passes;
-  the orchestration around them has not been executed.
+- **Docker Compose and the CI workflow have not been executed as such.** Docker
+  is not available in the environment this was built in, and the workflow has
+  not run on GitHub Actions. Every command either of them runs — `npm ci`,
+  `keys:generate`, `lint:check`, `format:check`, `typecheck`, `build`,
+  `migration:run`, `migration:show`, `migration:revert`, `test:ci` — was run
+  locally against a real PostgreSQL 18.4 and passes, and the container's exact
+  start-up line (`sh -c "[ -f certs/private.pem ] || npm run keys:generate; npm
+run migration:run && npm run dev"`) was run against an empty database and
+  brought the service up serving requests. What has not been exercised is the
+  orchestration: image build, service healthcheck ordering, container
+  networking.
 - **No refresh-token cleanup job.** Revoked and expired rows accumulate in
   `refresh_token`; a periodic delete is needed before this runs for long.
 - **Logout revokes the whole family, not every session.** There is no

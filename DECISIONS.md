@@ -125,18 +125,48 @@ which is both wrong and noisy in alerting.
 
 ---
 
-## 8. `synchronize` now, migrations later — stated plainly
+## 8. Migrations build every schema except the test one
 
-**Decision.** Ship with `synchronize: !IS_PRODUCTION` and document the gap rather
-than half-writing a migration setup.
+**Decision.** `synchronize` is now `Config.IS_TEST` — on only under
+`NODE_ENV=test`. Everything else, including a developer's own database, is built
+by the migrations in `src/migrations/`.
 
-**Why.** `synchronize` drops columns to make the database match the entities. It
-is right for a test suite that rebuilds the schema per case and wrong for
-anything holding real data. A migration directory that has never been run
-against a real database would be a bigger lie than an honest gap.
+**Why.** `synchronize` drops columns to make the database match the entities, so
+it is right for a suite that rebuilds the schema per case and wrong for anything
+holding data. The previous setting, `!IS_PRODUCTION`, left production with no
+supported way to create its schema at all — the service could not be deployed.
 
-**Cost.** There is currently no supported path to create a production schema.
-This is the first thing to build next.
+Turning it off in development as well is the part worth arguing for. If
+developers keep `synchronize`, their database is built by one mechanism and
+production by another, and a missing migration is invisible until deploy. With
+it off, a forgotten migration is a missing column on the developer's own laptop,
+which is where it costs nothing to find.
+
+**Migrations are listed explicitly** in `src/migrations/index.ts` rather than
+matched by a glob. TypeORM imports every migration during
+`DataSource.initialize()`, and a glob resolves to a different path in the
+TypeScript sources, in the compiled `build/` output and inside ts-jest's module
+registry. A static import list is the same in all three.
+
+**Migrations are generated, not hand-written.** `npm run migration:generate`
+diffs the entity classes against a database and emits the DDL, so the migration
+is the same SQL `synchronize` would have produced instead of a transcription of
+it that can be subtly wrong.
+
+**What stops the two drifting.** `tests/db/migrations.spec.ts` runs the
+migrations on an empty database and then asks TypeORM's schema builder what
+`synchronize` would still change. The answer has to be nothing. Adding a column
+to an entity without writing a migration fails that test with the exact
+`ALTER TABLE` in the message — verified by doing it.
+
+`migrationsTransactionMode: "each"` wraps each migration in its own transaction,
+so a migration that fails half way rolls back rather than leaving a schema that
+matches neither the before state nor the after.
+
+**Cost.** A developer now has to run `npm run migration:run` after pulling a
+schema change, and generating a migration needs a database to diff against.
+Both are the price of the schema in production being something that was
+reviewed rather than inferred at boot.
 
 ---
 

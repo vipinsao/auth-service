@@ -46,6 +46,9 @@ services:
     volumes:
       - .:/usr/src/app
       - /usr/src/app/node_modules
+    # No `command` override on purpose: the image's CMD already generates the
+    # key pair, runs `npm run migration:run` and only then starts the service.
+    # Overriding it here would let the two drift apart.
 
 volumes:
   postgres-data:

@@ -9,8 +9,10 @@ jobs:
   verify:
     runs-on: ubuntu-latest
 
-    # The test suite is a real integration suite: it talks to PostgreSQL, drops
-    # the schema between cases and re-creates it from the entity classes.
+    # The test suite is a real integration suite: it talks to PostgreSQL. Most
+    # of it drops the schema between cases and re-creates it from the entity
+    # classes; tests/db/migrations.spec.ts builds it with the migrations
+    # instead and checks the two agree.
     services:
       postgres:
         image: postgres:16-alpine
@@ -51,6 +53,18 @@ jobs:
       - run: npm run keys:generate
 
       - run: npm run lint:check
+      - run: npm run format:check
       - run: npm run typecheck
       - run: npm run build
+
+      # The deployable path, exercised the way a release would run it: the
+      # migration CLI against an empty database, then straight back down. It
+      # runs before test:ci deliberately - the suite drops and rebuilds the
+      # schema in its own beforeEach, so this leaves nothing behind for it.
+      - name: Migrations run and revert on an empty database
+        run: |
+          npm run migration:run
+          npm run migration:show
+          npm run migration:revert
+
       - run: npm run test:ci
