@@ -4,7 +4,13 @@ import { defineConfig, globalIgnores } from "eslint/config";
 
 export default defineConfig([
   // ESLint 9 no longer reads .eslintignore; ignores live here.
-  globalIgnores(["node_modules/**", "build/**", "coverage/**", "logs/**"]),
+  globalIgnores([
+    "node_modules/**",
+    "build/**",
+    "coverage/**",
+    "logs/**",
+    "web/**",
+  ]),
 
   {
     files: ["**/*.js"],

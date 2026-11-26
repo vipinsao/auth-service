@@ -57,6 +57,9 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
 
+      # The React demo UI: type-checked and bundled, so a broken UI fails CI too.
+      - run: npm run build:web
+
       # The deployable path, exercised the way a release would run it: the
       # migration CLI against an empty database, then straight back down. It
       # runs before test:ci deliberately - the suite drops and rebuilds the

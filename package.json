@@ -9,6 +9,8 @@
   "scripts": {
     "dev": "cross-env NODE_ENV=dev nodemon",
     "build": "tsc -p tsconfig.build.json",
+    "build:web": "npm --prefix web ci && npm --prefix web run build",
+    "dev:web": "npm --prefix web install && npm --prefix web run dev",
     "start": "cross-env NODE_ENV=prod node build/server.js",
     "typeorm": "node --loader ts-node/esm --no-warnings ./node_modules/typeorm/cli.js -d src/config/data-source.ts",
     "typeorm:built": "node ./node_modules/typeorm/cli.js -d build/config/data-source.js",

@@ -198,6 +198,13 @@ export const Config = {
   DB_USERNAME: process.env.DB_USERNAME as string,
   DB_PASSWORD: process.env.DB_PASSWORD as string,
   DB_NAME: process.env.DB_NAME as string,
+  /**
+   * TLS to PostgreSQL. Off by default because the local and Compose databases
+   * do not speak it; hosted Postgres (Neon, RDS, Render) requires it. When on,
+   * the server certificate is verified: TLS without verification stops a
+   * passive eavesdropper but not an impersonated database.
+   */
+  DB_SSL: process.env.DB_SSL === "true",
 
   // Tokens
   PRIVATE_KEY_PATH: str(process.env.PRIVATE_KEY_PATH, "certs/private.pem"),
