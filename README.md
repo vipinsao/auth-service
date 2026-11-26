@@ -1,12 +1,63 @@
-# auth-service
+# Auth Service
 
-A standalone authentication service in TypeScript: registration and login, RS256
-access tokens, rotating refresh tokens with reuse detection, password reset,
-email verification and role-based access control, backed by PostgreSQL.
+[![CI](https://github.com/vipinsao/auth-service/actions/workflows/ci.yml/badge.svg)](https://github.com/vipinsao/auth-service/actions/workflows/ci.yml)
+
+A standalone authentication service in TypeScript (Node.js, Express, PostgreSQL)
+with a small React demo UI. It handles registration, login, password reset,
+email verification and role-based access control, and keeps sessions safe with
+short-lived JWTs in `httpOnly` cookies and refresh tokens that rotate on every
+use.
+
+![The demo UI after logging in: the profile from GET /auth/self, a 403 from the admin-only route, and every API call listed on the right](docs/images/demo-dashboard.png)
+
+## At a glance
+
+|              |                                                                                                                                                                                   |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Features** | Register, log in, log out, "who am I", password reset, email verification, an admin-only route                                                                                    |
+| **Sessions** | RS256-signed access token and a refresh token, both in `httpOnly`, `SameSite=Strict` cookies. The refresh token is replaced on every use; reusing an old one revokes that session |
+| **Security** | bcrypt hashing, common-password check, rate limiting, account lockout with backoff, no account enumeration, Helmet security headers                                               |
+| **Data**     | PostgreSQL through TypeORM entities and versioned migrations                                                                                                                      |
+| **Quality**  | 104 tests, mostly integration tests against a real PostgreSQL; lint, type-check, format check and both builds run in GitHub Actions                                               |
+| **Docs**     | Swagger UI at `/api-docs`, [ARCHITECTURE.md](./ARCHITECTURE.md), [DECISIONS.md](./DECISIONS.md)                                                                                   |
+
+## Try it locally
+
+```bash
+npm install
+npm run keys:generate        # RS256 key pair into certs/ (gitignored)
+cp .env.example .env.dev
+npm run db:local             # own terminal: a real PostgreSQL, nothing to install
+npm run migration:run && npm run dev    # API and Swagger UI on http://localhost:5501
+npm run dev:web              # optional, own terminal: demo UI on http://localhost:3000
+```
+
+Full setup, Docker Compose and configuration are under [Setup](#setup).
+
+## The demo UI
+
+`web/` is a small React + Vite app: create an account, see your profile, rotate
+the refresh token, call the admin-only route and get a 403, and log out, with
+every API call and its status listed beside it. It also shows that the page's
+own JavaScript cannot see the tokens (`document.cookie` is empty), because they
+live in `httpOnly` cookies.
+
+In production the API serves the built UI itself (`src/utils/webApp.ts`), so the
+browser talks to one origin and the cookies can stay `SameSite=Strict` with no
+CORS exception. In development, Vite proxies the API paths for the same reason.
+
+## Deploying the demo
+
+`render.yaml` describes one free Render web service that builds the API and the
+UI, runs pending migrations on start and serves both. The database is external;
+a free Neon PostgreSQL works (`DB_SSL=true`). Before the first deploy, add
+`private.pem` and `public.pem` from `npm run keys:generate` as Render secret
+files. On the free tier the service sleeps when idle, so the first request after
+a while takes up to a minute.
 
 ## Run the tests first — the database comes with the repository
 
-93 tests, and **the repository brings its own PostgreSQL** — no Docker, no
+104 tests, and **the repository brings its own PostgreSQL** — no Docker, no
 system package, no account, nothing to install:
 
 ```bash
@@ -14,7 +65,7 @@ npm install
 npm run keys:generate
 cp .env.example .env.test          # then set DB_NAME=authservice_test
 npm run db:local                   # own terminal; wait for "ready to accept connections"
-npm run test:ci                    # 93 tests, ~35s
+npm run test:ci                    # 104 tests, ~35s
 ```
 
 `npm run db:local` starts a real platform PostgreSQL binary out of `.postgres/`
@@ -246,6 +297,7 @@ cp .env.example .env.test      # then change DB_NAME to authservice_test
 npm run db:local               # in its own terminal - see below
 npm run migration:run          # creates the schema
 npm run dev                    # http://localhost:5501
+npm run dev:web                # optional, own terminal: demo UI on http://localhost:3000
 ```
 
 The database has to exist and be migrated before the service starts:
@@ -375,7 +427,7 @@ installed, as at the top of this file.
 ```bash
 cp .env.example .env.test      # DB_NAME should be a scratch database
 npm run keys:generate
-npm run test:ci                # single run, CI-safe: 93 tests
+npm run test:ci                # single run, CI-safe: 104 tests
 npm run test:watch             # watch mode for local work
 ```
 
@@ -475,12 +527,15 @@ src/
   validators/          express-validator schemas per route
   routes/              auth, users, health
   docs/openapi.ts      hand-written OpenAPI document
+  utils/               cookie helpers; webApp.ts serves the demo UI build
+web/                   React + Vite demo UI (served by the API in production)
 tests/
   users/               register, login, refresh, rbac, password-reset, rate-limit
   ops/                 health, readiness, headers, docs, 404
   db/                  migrations up, down, parity with the entities;
                        the shared rate-limit store across two replicas
-  unit/                UserService with fake repositories
+  unit/                UserService with fake repositories, cookies,
+                       .env.example, serving the UI build
 ```
 
 ## Tech stack
@@ -492,6 +547,7 @@ Hardening: `helmet`, `cors`, `express-rate-limit`, `express-validator`,
 `cookie-parser`, `http-errors`.
 Operations: `winston`, `nodemailer`, `swagger-ui-express`, `dotenv`,
 OpenTelemetry (API, Node tracer, metrics SDK, OTLP HTTP exporters).
+Demo UI: React 18 and Vite 5.
 Tooling: Jest 30 with ts-jest, supertest, ESLint 9 (flat config), Prettier,
 husky and lint-staged.
 

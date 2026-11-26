@@ -4,6 +4,8 @@ import helmet from "helmet";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import swaggerUi from "swagger-ui-express";
+import path from "path";
+import { fileURLToPath } from "url";
 
 import { Config } from "./config/index.js";
 import { requestContext } from "./middlewares/requestContext.js";
@@ -12,6 +14,11 @@ import { openApiDocument } from "./docs/openapi.js";
 import authRouter from "./routes/auth.js";
 import userRouter from "./routes/users.js";
 import healthRouter from "./routes/health.js";
+import { mountWebApp } from "./utils/webApp.js";
+
+// __dirname is not defined in ES modules. src/app.ts and build/app.js both sit
+// one level below the repository root, so ../web/dist resolves from either.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 
@@ -72,6 +79,11 @@ app.use(express.json({ limit: "16kb" }));
 app.use(cookieParser());
 
 app.use(healthRouter);
+
+// The demo UI, when it has been built (npm run build:web). Mounted after
+// helmet so its pages get the strict CSP, and before the JSON index below so
+// that / serves the UI when there is one and the service summary when not.
+mountWebApp(app, path.resolve(__dirname, "../web/dist"));
 
 app.get("/", (_req, res) => {
   res.json({

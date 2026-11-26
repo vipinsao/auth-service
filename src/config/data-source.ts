@@ -14,6 +14,7 @@ export const AppDataSource = new DataSource({
   username: Config.DB_USERNAME,
   password: Config.DB_PASSWORD,
   database: Config.DB_NAME,
+  ssl: Config.DB_SSL ? { rejectUnauthorized: true } : false,
 
   // `synchronize` rewrites the schema from the entity classes on every boot and
   // will drop a column to do it. It is enabled only under NODE_ENV=test, where

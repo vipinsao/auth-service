@@ -1,0 +1,41 @@
+# Render Blueprint for the public demo: one free web service that runs the API
+# and serves the React demo UI from the same origin. The database is external
+# (Neon free tier works); fill in the DB_* values when Render asks for them.
+#
+# Two secret files must be added in the Render dashboard (Environment > Secret
+# Files) before the first deploy: private.pem and public.pem, generated with
+# `npm run keys:generate`. Render mounts them under /etc/secrets/.
+services:
+  - type: web
+    name: auth-service-demo
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build && npm run build:web
+    # Migrations run on every start; TypeORM skips the ones already applied.
+    startCommand: npm run migration:run:built && node build/server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: prod
+      - key: DB_HOST
+        sync: false
+      - key: DB_USERNAME
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_NAME
+        sync: false
+      - key: DB_SSL
+        value: "true"
+      - key: REFRESH_TOKEN_SECRET
+        generateValue: true
+      - key: PRIVATE_KEY_PATH
+        value: /etc/secrets/private.pem
+      - key: PUBLIC_KEY_PATH
+        value: /etc/secrets/public.pem
+      # Render's load balancer is the one proxy in front of the process.
+      - key: TRUST_PROXY
+        value: "1"
+      # Deliberately public for the demo, so visitors can try the API.
+      - key: ENABLE_API_DOCS
+        value: "true"
